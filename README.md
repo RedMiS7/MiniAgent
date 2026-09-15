@@ -232,3 +232,185 @@ OpenAI Responses 的转换保持独立。
 新增 tests/test_bailian.py 覆盖两模型的协议模拟测试，尚未做真实 API 验证。
 
 参考：[百炼 Chat Completions API](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)。
+
+## Tools 与 extensions（第一版）
+
+本版提供工具注册与执行层，尚未加入 Agent 自动循环，也没有 MCP 客户端。
+模型层和原有 cli.py 保持原来的职责；tools_cli.py 可独立测试工具，无需 API Key。
+
+- tools/base.py：异步 Tool 接口、ToolContext、ToolResult、文本/JSON 内容。
+- tools/registry.py：注册、重名检查、导出已有 ToolDefinition 和 JSON Schema 校验器。
+- tools/executor.py：解析 ToolCall、校验参数、执行、统一结果和生命周期事件。
+- extensions/files.py：list_files、read_file、write_file、edit_file。
+- extensions/shell.py：run_command，使用 argv 数组启动进程。
+- bootstrap.create_tools()：显式加载内置 extensions。
+
+安装依赖后试用：
+
+```powershell
+python tools_cli.py --list
+'{"path":"."}' | Set-Content -Encoding UTF8 tool-args.json
+python tools_cli.py --workspace . --tool list_files --arguments-file tool-args.json
+```
+
+tools_cli 的 stderr 显示 started/completed/failed/cancelled、工具名和耗时，
+stdout 输出本次工具的 JSON 结果。成功退出 0，执行失败 1，CLI 参数错误 2，取消 130。
+参数文件可放任意位置，由用户明确指定；其内容经过工具 Schema 校验。
+
+文件工具仅支持工作目录内的 UTF-8 文本。read_file 默认读 200 行并返回 sha256，
+write_file 只新建、不覆盖，edit_file 必须提供 read_file 返回的 expected_sha256，
+且 old_text 恰好匹配一次。修改结果包含有长度限制的 diff。父目录必须已存在。
+文件大小默认上限 1 MiB，展示结果默认上限 16384 字符，目录最多列出 200 项。
+绝对路径、目录越界、Windows ADS 和指向工作区外的符号链接会被拒绝。
+路径与 hash 校验不是操作系统沙箱，也不提供面对恶意并发路径替换、硬链接或崩溃时的事务保证。
+
+命令工具默认禁用，试用必须传 --allow-commands：
+
+```powershell
+'{"argv":["python","--version"]}' | Set-Content -Encoding UTF8 tool-args.json
+python tools_cli.py --tool run_command --arguments-file tool-args.json --allow-commands
+```
+
+命令采用 argv 分离传参，不自动拼接 shell 字符串；需要 shell 时必须显式调用对应程序。
+不打开交互窗口，stdin 关闭。默认超时 30 秒，stdout/stderr 各最多捕获 16384 字节，
+超出部分继续排空并标记 truncated。返回 exit_code、stdout、stderr。
+超时或取消会尝试终止进程树：Windows 使用 taskkill /T，POSIX 使用进程组。
+Windows 父进程提前退出、脱离进程树的子进程可能无法清理；不承诺强进程隔离。
+
+命令是受信任的本地执行，继承宿主权限和环境，cwd 不是安全边界；
+它可以访问工作区外文件和网络。启用前应在应用层确认任务授权。
+默认事件不包含完整参数、文件内容或命令输出；若 UI 需要显示完整命令，应按敏感信息策略处理。
+工具执行结果会包含内容，但不会自动写日志。事件回调故障不影响实际工具结果，避免诱发重复写入。
+
+上层使用示例：
+
+```python
+from pathlib import Path
+from miniagent.bootstrap import create_tools
+from miniagent.models import LLMRequest, Message
+from miniagent.tools import ToolContext, ToolExecutor
+
+registry = create_tools()
+executor = ToolExecutor(registry, ToolContext(Path(".")), on_event=print)
+request = LLMRequest([Message("user", "查看目录")], tools=registry.definitions())
+response = await llm.generate(request)
+if response.finish_reason == "tool_calls":
+    messages = [*request.messages, response.message]
+    for call in response.message.tool_calls:
+        result = await executor.execute(call)
+        messages.append(result.to_message(call.id))
+    # messages 可用于下一次模型调用；完整 Agent 循环在后续实现。
+```
+
+新增 extension 只需实现异步 Tool，并暴露 register(registry)：
+
+```python
+from miniagent.models import ToolDefinition
+from miniagent.tools import ToolContent, ToolResult
+
+class EchoTool:
+    definition = ToolDefinition("echo", "返回文本", {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+        "additionalProperties": False,
+    })
+
+    async def execute(self, arguments, context):
+        return ToolResult(True, (ToolContent("text", arguments["text"]),))
+
+def register(registry):
+    registry.register(EchoTool())
+```
+
+将模块加入 create_tools() 的显式加载列表即可。Extension 是受信任 Python 代码，
+不是权限隔离单元；不做动态扫描、热加载或任意路径插件加载。
+MCP 后续可通过代理工具接入同一接口，本版内容类型只有 text/json，
+图片和资源需要明确扩展类型与模型转换，不会静默压成文本。
+
+参数使用 jsonschema Draft 2020-12 校验；注册时拒绝远程 Schema 引用。
+工具 Schema、参数、路径和命令授权都由程序检查，不能由模型声明跳过。
+新增测试在临时目录执行文件操作，只运行测试用 Python 命令，不调用真实模型。
+
+## Image extension
+
+image 工具有 inspect（识别）和 generate（生成）两种操作。
+工具名称、描述及参数 Schema 均位于 extensions/image.py 的 ImageTool 类内。
+工具只使用 ImageBackend 协议，模型能力和厂商接口转换集中在 models/image_adapter.py。
+
+默认使用创建工具时注入的当前 ModelConfig，不另选模型：
+```python
+current = ModelConfig.from_env("bailian", "qwen3.7-plus")
+registry = create_tools(
+    current,
+    image_models={
+        "drawing": ModelConfig.from_env("bailian", "qwen-image-plus"),
+    },
+)
+```
+
+ToolCall 的 model 参数省略或为 current 时，绑定 current 配置。
+显式 model="drawing" 只选择本次图片调用的后端，不修改主对话模型。
+当前模型发生改变时，入口应使用新的配置重新创建工具注册表。
+
+能力未接入、当前模型未配置，或指定模型不在配置列表中时，返回：
+```json
+{
+  "success": false,
+  "content": [{"type": "json", "value": {
+    "selected_model": "current",
+    "available_models": ["drawing"]
+  }}],
+  "error": {"code": "unsupported_feature", "message": "..."}
+}
+```
+available_models 只包含已配置且该操作有适配能力的备选模型，不保证账号权限。
+Agent 可明确指定其中一个重试，或向用户解释无法完成。工具绝不自动回退。
+鉴权、限流、超时等错误也会统一返回；不会把所有失败都误报成模型能力不足。
+当前没有 Agent 自动循环，只实现了供 Agent 决策的工具结果和显式选择入口。
+
+当前适配能力（按精确 provider/model ID 校验，未知组合保守拒绝）：
+
+| provider | model | inspect | generate |
+|---|---|---|---|
+| openai | gpt-6-astra | 支持 | 支持 Responses 原生 image_generation 工具 |
+| openai | gpt-image-1.5 | 未接入 | 支持 Images API |
+| bailian | qwen3.7-plus | 支持 | 未接入 |
+| bailian | glm-5 | 未接入 | 未接入 |
+| bailian | qwen-image-plus | 未接入 | 支持百炼原生同步生图 API |
+| deepseek | deepseek-flash | 支持 | 未接入 |
+
+“未接入”表示本项目当前适配边界，不是对厂商全部产品能力的断言。
+OpenAI Responses 生图由所选聊天模型调用服务端的图片生成工具，
+底层图片模型由该 API 默认配置决定；这不是将主模型回退为其他聊天模型。
+能力表根据已查阅文档建立，不通过带费用的请求自动探测模型能力。
+
+图片操作的输入与输出路径必须在工作区内：
+- inspect：传 path 和 prompt；接受 PNG/JPEG/WebP，仅进行文件头格式识别，不完整解码校验。
+- generate：传 output_path 和 prompt；输出必须为新的 .png，父目录需已存在。
+- 图片读写上限默认 20 MiB，由 ToolContext.max_image_bytes 配置。
+- 识别文字受 max_output_chars 限制；结果不包含原始图片字节、Base64 或签名下载 URL。
+- 生成使用独立的单次请求，禁用自动重试，避免请求状态不确定时重复计费。
+- 百炼返回的图片只从 HTTPS 阿里云对象存储域名下载，不附带 API Key、不跟随重定向。
+- 取消本地请求不保证服务端停止生成或取消计费；已有输出文件不会被覆盖。
+- 成功结果返回相对路径、MIME 类型和文件字节数；CLI 不自动渲染图片。
+
+CLI 识别示例（已有 DASHSCOPE_API_KEY）：
+```powershell
+'{"action":"inspect","path":"photo.png","prompt":"描述这张图片"}' | Set-Content -Encoding UTF8 image-args.json
+python tools_cli.py --provider bailian --model qwen3.7-plus --tool image --arguments-file image-args.json
+```
+
+CLI 显式选择已配置生图模型：
+```powershell
+'{"action":"generate","prompt":"一只在窗边晒太阳的猫","output_path":"cat.png","model":"bailian:qwen-image-plus"}' | Set-Content -Encoding UTF8 image-args.json
+python tools_cli.py --provider bailian --model qwen3.7-plus --image-model bailian:qwen-image-plus --tool image --arguments-file image-args.json
+```
+--image-model 可重复传入 PROVIDER:MODEL，CLI 使用该完整字符串作为可选模型名称。
+每个提供商使用对应环境变量；工具不接受模型传入的 API Key 或任意服务地址。
+上述请求调用真实服务并产生用量；本次验证仅使用模拟 HTTP，没有实际发送图片或生成图片。
+
+参考：[OpenAI 图片生成](https://developers.openai.com/api/docs/guides/image-generation)、
+[百炼视觉理解](https://help.aliyun.com/zh/model-studio/vision)、
+[百炼 Qwen-Image](https://help.aliyun.com/zh/model-studio/qwen-image-api)、
+[DeepSeek 视觉](https://api-docs.deepseek.com/guides/vision/)。
