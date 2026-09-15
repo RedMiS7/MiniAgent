@@ -14,7 +14,7 @@ python -m venv .venv
 
 ## 真实 API 测试
 
-密钥从 OPENAI_API_KEY 或 DEEPSEEK_API_KEY 读取，不接受密钥命令行参数，
+密钥从 OPENAI_API_KEY、DEEPSEEK_API_KEY 或 DASHSCOPE_API_KEY 读取，不接受密钥命令行参数，
 不自动加载 .env。CLI 默认发送“你好”，真实请求会产生服务用量。
 
 PowerShell 隐藏输入密钥，避免把真实密钥字面值写入命令历史：
@@ -56,7 +56,7 @@ CLI 不执行工具；工具协议由上层 Agent / 工具执行器使用。
 ```text
 Agent / CLI
     → LLM.generate(LLMRequest) 或 LLM.stream(LLMRequest)
-    → OpenAIAdapter / DeepSeekAdapter
+    → OpenAIAdapter / DeepSeekAdapter / BailianAdapter
     → OpenAI SDK
     → LLMResponse / LLMEvent，失败则抛出 LLMError
 ```
@@ -192,3 +192,43 @@ usage 缺失时是 None，不能视为零消耗。SDK 和 HTTP 错误不会携�
 协议参考：[OpenAI Responses](https://developers.openai.com/api/docs/guides/reasoning)、
 [GPT-6 Astra](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-6-astra)、
 [DeepSeek 思考与工具调用](https://api-docs.deepseek.com/guides/thinking_mode/)。
+
+## 百炼：qwen3.7-plus 与 glm-5
+
+两种模型均使用 provider=bailian，通过阿里云北京地域的 OpenAI 兼容 Chat Completions
+接口调用，不是智谱官方直连接口。仅接入指定的两个模型 ID，不自动升级或切换。
+
+```powershell
+$credential = Get-Credential -UserName 'api' -Message '在密码框输入北京地域百炼 API Key'
+$env:DASHSCOPE_API_KEY = $credential.GetNetworkCredential().Password
+python cli.py --provider bailian --model qwen3.7-plus --prompt "你好"
+python cli.py --provider bailian --model glm-5 --prompt "你好" --reasoning high --stream
+```
+
+当前使用仍受支持的北京域名 https://dashscope.aliyuncs.com/compatible-mode/v1，
+无需提供业务空间 ID。需要使用北京地域有效的 API Key，真实请求会消耗额度。
+不使用 Coding Plan 专用入口，不自动读取 .env 文件。
+
+上层继续传相同的 LLMRequest / GenerationOptions：
+
+| 统一选项 | qwen3.7-plus | glm-5 |
+|---|---|---|
+| reasoning 省略 | 使用服务默认模式 | 使用服务默认模式 |
+| reasoning=none | enable_thinking=false | enable_thinking=false |
+| 推理档位 | 文档没有等价档位映射，明确报 unsupported_feature | low/medium/high → high，xhigh/max → max |
+| max_output_tokens | max_completion_tokens | max_completion_tokens |
+| temperature | 原样传入 | 原样传入 |
+| 历史续接状态 | reasoning_content + preserve_thinking=true | reasoning_content + clear_thinking=false |
+
+输出上限使用包含推理与回答的 max_completion_tokens，避免旧 max_tokens 的语义差异；
+服务文档说明实际 token 数可能有最多 10 个 token 的误差。
+不把 Qwen 的 thinking_budget 自动等同于推理档位，不新增任意厂商参数透传。
+如需要 Qwen 精确思考预算，应另行定义统一预算语义后扩展接口。
+保存模型返回的原始 Message，适配器会自动转换其 continuation；跨模型状态会被拒绝。
+
+新增 models/bailian_adapter.py 负责百炼参数规则；
+models/chat_adapter.py 复用 DeepSeek 与百炼的 Chat 响应、工具和 SSE 转换。
+OpenAI Responses 的转换保持独立。
+新增 tests/test_bailian.py 覆盖两模型的协议模拟测试，尚未做真实 API 验证。
+
+参考：[百炼 Chat Completions API](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)。

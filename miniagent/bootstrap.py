@@ -2,6 +2,7 @@ from openai import AsyncOpenAI
 
 from .config import ModelConfig
 from .models import LLM
+from .models.bailian_adapter import BailianAdapter
 from .models.deepseek_adapter import DeepSeekAdapter
 from .models.openai_adapter import OpenAIAdapter
 
@@ -13,5 +14,7 @@ def create_model(config: ModelConfig) -> LLM:
         timeout=config.timeout,
         max_retries=config.max_retries,
     )
-    adapter = DeepSeekAdapter if config.provider == "deepseek" else OpenAIAdapter
+    adapter = {
+        "openai": OpenAIAdapter, "deepseek": DeepSeekAdapter, "bailian": BailianAdapter,
+    }[config.provider]
     return adapter(client=client, model=config.model)

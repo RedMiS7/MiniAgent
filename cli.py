@@ -50,7 +50,7 @@ async def run(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Test one real model API call.")
-    parser.add_argument("--provider", required=True, choices=["openai", "deepseek"])
+    parser.add_argument("--provider", required=True, choices=["openai", "deepseek", "bailian"])
     parser.add_argument("--model", required=True, help="Model ID available to your account")
     parser.add_argument("--prompt", default="你好")
     parser.add_argument("--system", help="Optional system message")
