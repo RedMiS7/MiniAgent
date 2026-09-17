@@ -105,13 +105,13 @@ class OpenAIAdapter:
             raise LLMError("invalid_response", "Model returned no answer.")
         continuation = None
         if reasoning:
-            continuation = ContinuationState("openai", self._model, json.dumps(reasoning))
+            continuation = ContinuationState(provider="openai", model=self._model, payload=json.dumps(reasoning))
         return LLMResponse(
-            Message(
-                "assistant", "".join(text), tuple(calls), continuation=continuation,
+            message=Message(
+                role="assistant", content="".join(text), tool_calls=tuple(calls), continuation=continuation,
                 refusal="".join(refusals) if refusals else None,
             ),
-            finish, usage_from(data.get("usage"), "input_tokens", "output_tokens"),
+            finish_reason=finish, usage=usage_from(data.get("usage"), "input_tokens", "output_tokens"),
         )
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
@@ -130,24 +130,24 @@ class OpenAIAdapter:
                     data = event.model_dump(exclude_none=True)
                     kind = data["type"]
                     if kind == "response.output_text.delta":
-                        yield TextDelta(require_text(data["delta"]))
+                        yield TextDelta(text=require_text(data["delta"]))
                     elif kind == "response.output_item.added" and data["item"]["type"] == "function_call":
                         item = data["item"]
                         index = data["output_index"]
                         if index in started:
                             raise LLMError("invalid_response", "Duplicate tool stream index.")
                         started.add(index)
-                        yield ToolCallStarted(index, require_text(item["call_id"]), require_text(item["name"]))
+                        yield ToolCallStarted(index=index, id=require_text(item["call_id"]), name=require_text(item["name"]))
                         if item.get("arguments"):
-                            yield ToolArgumentsDelta(index, require_text(item["arguments"]))
+                            yield ToolArgumentsDelta(index=index, delta=require_text(item["arguments"]))
                     elif kind == "response.function_call_arguments.delta":
                         index = data["output_index"]
                         if index not in started:
                             raise LLMError("invalid_response", "Tool delta arrived before tool start.")
-                        yield ToolArgumentsDelta(index, require_text(data["delta"]))
+                        yield ToolArgumentsDelta(index=index, delta=require_text(data["delta"]))
                     elif kind in ("response.completed", "response.incomplete"):
                         result = self._response(data["response"])
-                        yield ResponseCompleted(result)
+                        yield ResponseCompleted(response=result)
                         return
                     elif kind in ("error", "response.failed"):
                         raise LLMError("api", "Model stream failed.")

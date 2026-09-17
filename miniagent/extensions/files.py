@@ -15,7 +15,7 @@ def _read(path, context):
 
 
 def _result(data):
-    return ToolResult(True, (ToolContent("json", data),))
+    return ToolResult(success=True, content=(ToolContent(type="json", value=data),))
 
 
 class FileTool:

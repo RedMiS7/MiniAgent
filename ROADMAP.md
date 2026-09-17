@@ -17,7 +17,7 @@
 Harness 用于让不同任务通过配置和依赖组合运行，无需重复编写模型接入、工具接入与运行控制代码。
 这些是职责边界，不要求每个术语都对应一个独立类或框架。
 
-按 P0 → P6 推进，当前重点是 P3；P5 完成后即可交付最小学习版，P7 按需探索。
+按 P0 → P6 推进，P4 的 CLI 闭环已实现，P3 整体完成状态待单独复查；P5 完成后即可交付最小学习版，P7 按需探索。
 已勾选表示已有实现，未勾选表示待完成；本次文档调整不改变完成状态。
 各阶段默认使用离线模拟测试验收，真实接口验证单独记录。
 
@@ -67,19 +67,24 @@ Harness 用于让不同任务通过配置和依赖组合运行，无需重复编
 - AgentEvent 表达运行进度与结束，LLMEvent 表达模型增量与完成，ToolEvent 表达工具执行状态；事件能正确关联到对应运行和调用。
 - 消息、调用 ID、工具结果与模型续接状态在传递中保持一致，非法数据被明确拒绝，已有模型和工具测试继续通过。
 
-本阶段验收数据契约；实际执行循环在 P4 实现。
+本阶段验收数据契约；实际执行循环在 P4 实现。运行关联由上层回调或事件流负责，具体汇集机制在 P5 实现，不要求底层事件携带运行 ID。
+
+P3.1 进展：模型核心类型与工具结果已迁移到 Pydantic，并通过迁移验收；事件现已统一为独立 Pydantic 类型和带 type 判别字段的联合，当前 80 项离线测试通过。Agent 最终结果与组件交接约定仍待完成，见 docs/p3-1-pydantic-core-types.md。
 
 ## P4：Agent Loop
 
-- [ ] 实现 Model → Tool Calls → Tool Results → Model 循环。
-- [ ] 在单次任务内组装 Messages，保留模型续接状态。
-- [ ] 根据模型响应继续循环或返回结果。
+- [x] 提供流式消费
+- [x] Loop每一步的提示信息
+- [x] tool 调用 Loop
+- [x] Agent event
 
 **验收标准**
 
 - 假模型能完成“列目录 → 读文件 → 总结”，至少经过两轮工具往返；纯文本任务能直接结束。
 - Tool Results 与 Tool Calls 正确配对，下一轮模型请求包含完整 Messages 和续接状态。
 - 完整工具调用才交给 Tool Executor；工具失败能回传，模型异常和取消能向调用方传递，非正常结束不被当作成功。
+
+P4 已实现 AgentLoop 与 agent_cli.py，按用户要求提前提供 CLI 单任务输入与流式过程展示；含最小轮数上限，不代表 P5/P6 已完成。设计与验证见 docs/p4-agent-loop.md。
 
 ## P5：Agent Runtime 与 Agent Harness
 
@@ -96,6 +101,8 @@ Harness 用于让不同任务通过配置和依赖组合运行，无需重复编
 - 至少两种现有 Model Adapters 通过模拟工具往返测试；替换 Model 或注册新 Tool 无需修改 Agent Loop 和 Runtime。
 
 ## P6：Session 与 Streaming
+
+CLI 多轮子任务已完成：agent_cli.py 在单进程内保留成功历史及续接状态，支持追问和退出；失败结束会话。完整 Session/Harness 接入仍待完成，见 docs/cli-multiturn-conversation.md。
 
 - [ ] 用 Session 管理内存中的多轮 Messages 与续接状态。
 - [ ] 将 Session 接入 Harness，支持继续对话和新建会话。

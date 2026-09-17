@@ -1,7 +1,6 @@
 """Exercise registered tools; image actions may call model APIs."""
 import argparse
 import asyncio
-from dataclasses import asdict
 import json
 from pathlib import Path
 import sys
@@ -9,7 +8,7 @@ import sys
 from miniagent.bootstrap import create_tools
 from miniagent.config import ModelConfig
 from miniagent.models import ToolCall
-from miniagent.tools import ToolContext, ToolExecutor
+from miniagent.tools import ToolContext, ToolExecutor, ToolStarted
 
 
 def main():
@@ -40,7 +39,7 @@ def main():
     except ValueError as exc:
         parser.error(str(exc))
     if args.list:
-        print(json.dumps([asdict(d) for d in registry.definitions()], ensure_ascii=False, indent=2))
+        print(json.dumps([d.model_dump() for d in registry.definitions()], ensure_ascii=False, indent=2))
         return 0
     if not args.tool:
         parser.error("Specify --tool or --list.")
@@ -49,7 +48,8 @@ def main():
     except (ValueError, OSError):
         parser.error("Workspace must be an existing directory.")
     def show(event):
-        print(f"[{event.type}] {event.tool_name} ({event.elapsed_seconds:.3f}s)", file=sys.stderr)
+        elapsed = "" if isinstance(event, ToolStarted) else f" ({event.elapsed_seconds:.3f}s)"
+        print(f"[{event.type}] {event.tool_name}{elapsed}", file=sys.stderr)
     executor = ToolExecutor(registry, context, on_event=show)
     arguments = args.arguments
     if args.arguments_file:
@@ -58,7 +58,7 @@ def main():
         except (OSError, UnicodeError):
             parser.error("Cannot read arguments file.")
     try:
-        result = asyncio.run(executor.execute(ToolCall("cli-1", args.tool, arguments)))
+        result = asyncio.run(executor.execute(ToolCall(id="cli-1", name=args.tool, arguments=arguments)))
     except KeyboardInterrupt:
         return 130
     print(result.to_message("cli-1").content)

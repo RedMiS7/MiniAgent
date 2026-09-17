@@ -3,6 +3,8 @@ import contextlib
 import io
 import json
 import unittest
+
+from pydantic import ValidationError
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -19,7 +21,7 @@ from miniagent.models import (
 from miniagent.models.deepseek_adapter import DeepSeekAdapter
 from miniagent.models.openai_adapter import OpenAIAdapter
 
-TOOL = ToolDefinition("weather", "Weather lookup", {"type": "object", "properties": {}})
+TOOL = ToolDefinition(name="weather", description="Weather lookup", parameters={"type": "object", "properties": {}})
 
 
 def completion(content="hello", finish="stop", **message_extra):
@@ -75,8 +77,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         return model
 
     async def test_same_request_has_provider_specific_wire_format(self):
-        request = LLMRequest([Message("user", "hello")], [TOOL],
-                             GenerationOptions(max_output_tokens=200, reasoning="high"))
+        request = LLMRequest(messages=[Message(role="user", content="hello")], tools=[TOOL],
+                             options=GenerationOptions(max_output_tokens=200, reasoning="high"))
         for provider in ("openai", "deepseek"):
             def handler(http_request):
                 body = json.loads(http_request.content)
@@ -99,7 +101,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json=completion())
             with self.subTest(provider=provider):
                 result = await self.adapter(provider, handler).generate(request)
-                self.assertEqual(result, LLMResponse(Message("assistant", "hello"), "stop", TokenUsage(3, 2)))
+                self.assertEqual(result, LLMResponse(message=Message(role="assistant", content="hello"), finish_reason="stop", usage=TokenUsage(input_tokens=3, output_tokens=2)))
 
     async def test_reasoning_mapping_and_disable(self):
         for effort, actual in [("medium", "high"), ("xhigh", "high"), ("none", None)]:
@@ -109,7 +111,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(body["thinking"]["type"], "disabled" if actual is None else "enabled")
                 return httpx.Response(200, json=completion())
             await self.adapter("deepseek", handler).generate(LLMRequest(
-                [Message("user", "hi")], options=GenerationOptions(reasoning=effort),
+                messages=[Message(role="user", content="hi")], options=GenerationOptions(reasoning=effort),
             ))
 
     async def test_unsupported_options_do_not_send_http(self):
@@ -122,7 +124,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         ]:
             with self.subTest(provider=provider, options=options):
                 with self.assertRaises(LLMError) as caught:
-                    await self.adapter(provider, handler).generate(LLMRequest([Message("user", "hi")], options=options))
+                    await self.adapter(provider, handler).generate(LLMRequest(messages=[Message(role="user", content="hi")], options=options))
                 self.assertEqual(caught.exception.code, "unsupported_feature")
 
     async def test_tool_round_trip_preserves_continuation(self):
@@ -155,23 +157,23 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json=completion("sunny"))
             with self.subTest(provider=provider):
                 model = self.adapter(provider, handler)
-                initial = Message("user", "weather?")
-                first = await model.generate(LLMRequest([initial], [TOOL]))
+                initial = Message(role="user", content="weather?")
+                first = await model.generate(LLMRequest(messages=[initial], tools=[TOOL]))
                 self.assertEqual(first.finish_reason, "tool_calls")
-                self.assertEqual(first.message.tool_calls, (ToolCall("call_1", "weather", "{}"),))
+                self.assertEqual(first.message.tool_calls, (ToolCall(id="call_1", name="weather", arguments="{}"),))
                 self.assertNotIn("private-thinking", repr(first))
-                result = await model.generate(LLMRequest([
-                    initial, first.message, Message("tool", "sunny", tool_call_id="call_1"),
-                ], [TOOL]))
+                result = await model.generate(LLMRequest(messages=[
+                    initial, first.message, Message(role="tool", content="sunny", tool_call_id="call_1"),
+                ], tools=[TOOL]))
                 self.assertEqual(result.text, "sunny")
 
     async def test_foreign_continuation_rejected(self):
         def handler(request):
             self.fail("Foreign continuation sent")
-        message = Message("assistant", "hi", continuation=ContinuationState("other", "test", "{}"))
+        message = Message(role="assistant", content="hi", continuation=ContinuationState(provider="other", model="test", payload="{}"))
         for provider in ("openai", "deepseek"):
             with self.assertRaises(LLMError) as caught:
-                await self.adapter(provider, handler).generate(LLMRequest([message, Message("user", "hi")]))
+                await self.adapter(provider, handler).generate(LLMRequest(messages=[message, Message(role="user", content="hi")]))
             self.assertEqual(caught.exception.code, "invalid_request")
 
     async def test_finish_reasons_are_results(self):
@@ -187,7 +189,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         ]:
             with self.subTest(provider=provider, reason=reason):
                 model = self.adapter(provider, lambda r: httpx.Response(200, json=body))
-                self.assertEqual((await model.generate(LLMRequest([Message("user", "hi")]))).finish_reason, reason)
+                self.assertEqual((await model.generate(LLMRequest(messages=[Message(role="user", content="hi")]))).finish_reason, reason)
 
     async def test_bad_response_and_missing_usage(self):
         for provider in ("openai", "deepseek"):
@@ -195,12 +197,12 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 for body in ({}, response("") if provider == "openai" else completion(None)):
                     model = self.adapter(provider, lambda r: httpx.Response(200, json=body))
                     with self.assertRaises(LLMError) as caught:
-                        await model.generate(LLMRequest([Message("user", "hi")]))
+                        await model.generate(LLMRequest(messages=[Message(role="user", content="hi")]))
                     self.assertEqual(caught.exception.code, "invalid_response")
                 body = response() if provider == "openai" else completion()
                 body.pop("usage")
                 model = self.adapter(provider, lambda r: httpx.Response(200, json=body))
-                self.assertIsNone((await model.generate(LLMRequest([Message("user", "hi")]))).usage)
+                self.assertIsNone((await model.generate(LLMRequest(messages=[Message(role="user", content="hi")]))).usage)
 
     async def test_http_errors_are_sanitized_and_not_retried(self):
         for provider in ("openai", "deepseek"):
@@ -212,7 +214,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                     return httpx.Response(status, json={"error": {"message": "secret-input"}})
                 with self.subTest(provider=provider, status=status):
                     with self.assertRaises(LLMError) as caught:
-                        await self.adapter(provider, handler).generate(LLMRequest([Message("user", "hi")]))
+                        await self.adapter(provider, handler).generate(LLMRequest(messages=[Message(role="user", content="hi")]))
                     self.assertEqual(caught.exception.code, code)
                     self.assertEqual(caught.exception.retryable, status in (429, 500))
                     self.assertNotIn("secret-input", str(caught.exception))
@@ -225,7 +227,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                     raise error_type("secret-input", request=request)
                 with self.subTest(provider=provider, code=code):
                     with self.assertRaises(LLMError) as caught:
-                        await self.adapter(provider, handler).generate(LLMRequest([Message("user", "hi")]))
+                        await self.adapter(provider, handler).generate(LLMRequest(messages=[Message(role="user", content="hi")]))
                     self.assertEqual(caught.exception.code, code)
 
     async def test_text_stream_final_response_and_usage(self):
@@ -244,10 +246,10 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(provider=provider):
                 http_response = sse(events)
                 model = self.adapter(provider, lambda r: http_response)
-                result = [e async for e in model.stream(LLMRequest([Message("user", "hi")]))]
+                result = [e async for e in model.stream(LLMRequest(messages=[Message(role="user", content="hi")]))]
                 self.assertEqual("".join(e.text for e in result if isinstance(e, TextDelta)), "hello")
                 self.assertIsInstance(result[-1], ResponseCompleted)
-                self.assertEqual(result[-1].response.usage, TokenUsage(3, 2))
+                self.assertEqual(result[-1].response.usage, TokenUsage(input_tokens=3, output_tokens=2))
                 self.assertTrue(http_response.is_closed)
 
     async def test_interleaved_tool_streams(self):
@@ -272,7 +274,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 events.append(chunk({}, "tool_calls"))
             with self.subTest(provider=provider):
                 model = self.adapter(provider, lambda r: sse(events))
-                results = [e async for e in model.stream(LLMRequest([Message("user", "hi")], [TOOL]))]
+                results = [e async for e in model.stream(LLMRequest(messages=[Message(role="user", content="hi")], tools=[TOOL]))]
                 self.assertEqual(len([e for e in results if isinstance(e, ToolCallStarted)]), 2)
                 for i in range(2):
                     self.assertEqual("".join(e.delta for e in results
@@ -287,7 +289,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             http_response = sse(events)
             model = self.adapter(provider, lambda r: http_response)
             with self.assertRaises(LLMError) as caught:
-                _ = [e async for e in model.stream(LLMRequest([Message("user", "hi")]))]
+                _ = [e async for e in model.stream(LLMRequest(messages=[Message(role="user", content="hi")]))]
             self.assertEqual(caught.exception.code, "invalid_response")
             self.assertTrue(http_response.is_closed)
 
@@ -298,7 +300,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         ]:
             http_response = sse(events)
             model = self.adapter(provider, lambda r: http_response)
-            stream = model.stream(LLMRequest([Message("user", "hi")]))
+            stream = model.stream(LLMRequest(messages=[Message(role="user", content="hi")]))
             await anext(stream)
             await stream.aclose()
             self.assertTrue(http_response.is_closed)
@@ -326,7 +328,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             model = self.adapter(provider, lambda r: httpx.Response(
                 200, headers={"content-type": "text/event-stream"}, stream=transport_stream,
             ))
-            events = model.stream(LLMRequest([Message("user", "hi")]))
+            events = model.stream(LLMRequest(messages=[Message(role="user", content="hi")]))
             self.assertIsInstance(await anext(events), TextDelta)
             with self.assertRaises(LLMError) as caught:
                 await anext(events)
@@ -355,7 +357,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             model = self.adapter(provider, lambda r: httpx.Response(
                 200, headers={"content-type": "text/event-stream"}, stream=transport_stream,
             ))
-            events = model.stream(LLMRequest([Message("user", "hi")]))
+            events = model.stream(LLMRequest(messages=[Message(role="user", content="hi")]))
             await anext(events)
             task = asyncio.create_task(anext(events))
             await asyncio.wait_for(entered.wait(), timeout=2)
@@ -370,24 +372,24 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                     if provider == "openai" else {"error": {"message": "secret"}})
             model = self.adapter(provider, lambda r: sse([data]))
             with self.assertRaises(LLMError) as caught:
-                _ = [e async for e in model.stream(LLMRequest([Message("user", "hi")]))]
+                _ = [e async for e in model.stream(LLMRequest(messages=[Message(role="user", content="hi")]))]
             self.assertNotIn("secret", str(caught.exception))
 
 
 class ProtocolTests(unittest.TestCase):
     def test_invalid_requests(self):
         factories = [
-            lambda: LLMRequest([]),
+            lambda: LLMRequest(messages=[]),
             lambda: GenerationOptions(max_output_tokens=-1),
             lambda: GenerationOptions(reasoning="unsupported"),
             lambda: GenerationOptions(temperature=float("nan")),
-            lambda: Message("user", tool_calls=(ToolCall("c", "f", "{}"),)),
-            lambda: Message("tool", "result"),
-            lambda: LLMRequest([Message("tool", "result", tool_call_id="c")]),
-            lambda: LLMRequest([Message("assistant", tool_calls=(ToolCall("c", "f", "{}"),))]),
+            lambda: Message(role="user", tool_calls=(ToolCall(id="c", name="f", arguments="{}"),)),
+            lambda: Message(role="tool", content="result"),
+            lambda: LLMRequest(messages=[Message(role="tool", content="result", tool_call_id="c")]),
+            lambda: LLMRequest(messages=[Message(role="assistant", tool_calls=(ToolCall(id="c", name="f", arguments="{}"),))]),
         ]
         for factory in factories:
-            with self.assertRaises(LLMError):
+            with self.assertRaises(ValidationError):
                 factory()
 
     def test_protocol_has_no_sdk_dependency(self):
@@ -439,7 +441,7 @@ class CliTests(unittest.TestCase):
     def test_success_uses_unified_request_for_both_providers(self):
         for provider in ("openai", "deepseek"):
             model = AsyncMock()
-            model.generate.return_value = LLMResponse(Message("assistant", "hello"), "stop")
+            model.generate.return_value = LLMResponse(message=Message(role="assistant", content="hello"), finish_reason="stop")
             with patch.dict("os.environ", {provider.upper() + "_API_KEY": "fake"}, clear=True), \
                  patch("cli.create_model", return_value=model), \
                  contextlib.redirect_stdout(io.StringIO()) as output:
@@ -448,7 +450,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(output.getvalue(), "hello\n")
             model.generate.assert_awaited_once_with(LLMRequest(
-                [Message("system", "Be brief."), Message("user", "hi")],
+                messages=[Message(role="system", content="Be brief."), Message(role="user", content="hi")],
                 options=GenerationOptions(max_output_tokens=200, reasoning="high"),
             ))
             model.aclose.assert_awaited_once()
@@ -464,6 +466,15 @@ class CliTests(unittest.TestCase):
         self.assertIn("[timeout]", output.getvalue())
         model.aclose.assert_awaited_once()
 
+    def test_invalid_options_do_not_create_client(self):
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "fake"}, clear=True), \
+             patch("cli.create_model") as factory, \
+             contextlib.redirect_stderr(io.StringIO()) as output:
+            code = cli.main(["--provider", "openai", "--model", "test", "--max-output-tokens", "-1"])
+        self.assertEqual(code, 2)
+        self.assertIn("Configuration error", output.getvalue())
+        factory.assert_not_called()
+
     def test_missing_key_does_not_create_client(self):
         with patch.dict("os.environ", {}, clear=True), \
              patch("cli.create_model") as factory, \
@@ -478,8 +489,8 @@ class CliTests(unittest.TestCase):
             closed = False
 
             async def stream(self, request):
-                yield TextDelta("hello")
-                yield ResponseCompleted(LLMResponse(Message("assistant", "hello"), "stop"))
+                yield TextDelta(text="hello")
+                yield ResponseCompleted(response=LLMResponse(message=Message(role="assistant", content="hello"), finish_reason="stop"))
 
             async def aclose(self):
                 self.closed = True

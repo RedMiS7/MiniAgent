@@ -26,7 +26,7 @@ async def run(
         if system is not None:
             messages.append(Message(role="system", content=system))
         messages.append(Message(role="user", content=prompt))
-        request = LLMRequest(messages, options=options or GenerationOptions())
+        request = LLMRequest(messages=messages, options=options or GenerationOptions())
         if stream:
             response = None
             async with aclosing(model.stream(request)) as events:
@@ -67,7 +67,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = ModelConfig.from_env(
             args.provider, args.model, args.timeout, args.max_retries,
         )
-        options = GenerationOptions(args.max_output_tokens, args.reasoning, args.temperature)
+        options = GenerationOptions(max_output_tokens=args.max_output_tokens, reasoning=args.reasoning, temperature=args.temperature)
         answer = asyncio.run(run(config, args.prompt, args.system, options, args.stream))
         if not args.stream:
             print(answer)

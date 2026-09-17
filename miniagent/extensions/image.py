@@ -54,8 +54,8 @@ class ImageTool:
             if name != selected and getattr(backend.capabilities, action)
         ]
         return ToolResult(
-            False, (ToolContent("json", {"selected_model": selected, "available_models": alternatives}),),
-            code, message,
+            success=False, content=(ToolContent(type="json", value={"selected_model": selected, "available_models": alternatives}),),
+            error_code=code, error_message=message,
         )
 
     async def execute(self, arguments, context):
@@ -79,7 +79,7 @@ class ImageTool:
                 if len(data) > context.max_image_bytes:
                     raise ToolError("file_too_large", "Image exceeds the size limit.")
                 text = await backend.inspect(data, _mime(data), arguments["prompt"])
-                return ToolResult(True, (ToolContent("json", {
+                return ToolResult(success=True, content=(ToolContent(type="json", value={
                     "model": selected, "text": text[:context.max_output_chars],
                     "truncated": len(text) > context.max_output_chars,
                 }),))
@@ -103,7 +103,7 @@ class ImageTool:
                     output.write(data)
             except FileExistsError:
                 raise ToolError("already_exists", "Image output appeared during generation.") from None
-            return ToolResult(True, (ToolContent("json", {
+            return ToolResult(success=True, content=(ToolContent(type="json", value={
                 "model": selected, "path": arguments["output_path"], "mime_type": "image/png",
                 "bytes": len(data),
             }),))

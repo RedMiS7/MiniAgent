@@ -48,7 +48,7 @@ def usage_from(data: dict | None, input_key: str, output_key: str) -> TokenUsage
     values = (data[input_key], data[output_key])
     if any(type(value) is not int or value < 0 for value in values):
         raise LLMError("invalid_response", "Invalid token usage.")
-    return TokenUsage(*values)
+    return TokenUsage(input_tokens=values[0], output_tokens=values[1])
 
 
 def require_text(value) -> str:
@@ -60,4 +60,4 @@ def require_text(value) -> str:
 def tool_call_from(call_id, name, arguments) -> ToolCall:
     if not isinstance(call_id, str) or not call_id.strip() or not isinstance(name, str) or not name.strip():
         raise LLMError("invalid_response", "Invalid tool call identity.")
-    return ToolCall(call_id, name, require_text(arguments))
+    return ToolCall(id=call_id, name=name, arguments=require_text(arguments))

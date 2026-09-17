@@ -46,7 +46,7 @@ class BailianTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json=completion())
             with self.subTest(model=model):
                 result = await self.adapter(model, handler).generate(LLMRequest(
-                    [Message("user", "hi")], [TOOL], GenerationOptions(256, "none", 0.5),
+                    messages=[Message(role="user", content="hi")], tools=[TOOL], options=GenerationOptions(max_output_tokens=256, reasoning="none", temperature=0.5),
                 ))
                 self.assertEqual(result.text, "hello")
 
@@ -59,7 +59,7 @@ class BailianTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(body["enable_thinking"])
                 return httpx.Response(200, json=completion())
             await self.adapter("glm-5", handler).generate(LLMRequest(
-                [Message("user", "hi")], options=GenerationOptions(reasoning=effort),
+                messages=[Message(role="user", content="hi")], options=GenerationOptions(reasoning=effort),
             ))
 
     async def test_qwen_effort_and_unknown_model_rejected_before_http(self):
@@ -68,7 +68,7 @@ class BailianTests(unittest.IsolatedAsyncioTestCase):
         for model, effort in [("qwen3.7-plus", "high"), ("glm-5.2", None)]:
             with self.assertRaises(LLMError) as caught:
                 await self.adapter(model, handler).generate(LLMRequest(
-                    [Message("user", "hi")], options=GenerationOptions(reasoning=effort),
+                    messages=[Message(role="user", content="hi")], options=GenerationOptions(reasoning=effort),
                 ))
             self.assertEqual(caught.exception.code, "unsupported_feature")
 
@@ -96,23 +96,23 @@ class BailianTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json=completion("sunny"))
             with self.subTest(model=model):
                 llm = self.adapter(model, handler)
-                user = Message("user", "weather?")
-                first = await llm.generate(LLMRequest([user], [TOOL]))
+                user = Message(role="user", content="weather?")
+                first = await llm.generate(LLMRequest(messages=[user], tools=[TOOL]))
                 self.assertEqual(first.message.continuation.provider, "bailian")
                 self.assertNotIn("opaque-history", repr(first))
-                second = await llm.generate(LLMRequest([
-                    user, first.message, Message("tool", "sunny", tool_call_id="call"),
-                ], [TOOL]))
+                second = await llm.generate(LLMRequest(messages=[
+                    user, first.message, Message(role="tool", content="sunny", tool_call_id="call"),
+                ], tools=[TOOL]))
                 self.assertEqual(second.text, "sunny")
 
     async def test_foreign_model_continuation_rejected(self):
         for model in MODELS:
             def handler(request):
                 self.fail("Foreign state sent")
-            state = ContinuationState("bailian", "other-model", '""')
+            state = ContinuationState(provider="bailian", model="other-model", payload='""')
             with self.assertRaises(LLMError) as caught:
-                await self.adapter(model, handler).generate(LLMRequest([
-                    Message("assistant", "hi", continuation=state), Message("user", "hi"),
+                await self.adapter(model, handler).generate(LLMRequest(messages=[
+                    Message(role="assistant", content="hi", continuation=state), Message(role="user", content="hi"),
                 ]))
             self.assertEqual(caught.exception.code, "invalid_request")
 
@@ -130,8 +130,8 @@ class BailianTests(unittest.IsolatedAsyncioTestCase):
             ]
             http_response = sse(events)
             llm = self.adapter(model, lambda r: http_response)
-            result = [e async for e in llm.stream(LLMRequest([Message("user", "hi")], [TOOL]))]
-            self.assertEqual(result[0], TextDelta("checking"))
+            result = [e async for e in llm.stream(LLMRequest(messages=[Message(role="user", content="hi")], tools=[TOOL]))]
+            self.assertEqual(result[0], TextDelta(text="checking"))
             self.assertIsInstance(result[1], ToolCallStarted)
             self.assertEqual("".join(e.delta for e in result if isinstance(e, ToolArgumentsDelta)), "{}")
             self.assertIsInstance(result[-1], ResponseCompleted)
@@ -145,12 +145,12 @@ class BailianTests(unittest.IsolatedAsyncioTestCase):
                 401, json={"error": {"message": "secret"}},
             ))
             with self.assertRaises(LLMError) as caught:
-                await llm.generate(LLMRequest([Message("user", "hi")]))
+                await llm.generate(LLMRequest(messages=[Message(role="user", content="hi")]))
             self.assertEqual(caught.exception.code, "authentication")
             self.assertNotIn("secret", str(caught.exception))
             llm = self.adapter(model, lambda r: sse([chunk({"content": "partial"})]))
             with self.assertRaises(LLMError) as caught:
-                _ = [e async for e in llm.stream(LLMRequest([Message("user", "hi")]))]
+                _ = [e async for e in llm.stream(LLMRequest(messages=[Message(role="user", content="hi")]))]
             self.assertEqual(caught.exception.code, "invalid_response")
 
 
@@ -171,11 +171,11 @@ class BailianEntryTests(unittest.TestCase):
     def test_cli_uses_unchanged_unified_request(self):
         for name in MODELS:
             llm = AsyncMock()
-            llm.generate.return_value = LLMResponse(Message("assistant", "hello"), "stop")
+            llm.generate.return_value = LLMResponse(message=Message(role="assistant", content="hello"), finish_reason="stop")
             with patch.dict("os.environ", {"DASHSCOPE_API_KEY": "fake"}, clear=True), \
                  patch("cli.create_model", return_value=llm), \
                  contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(cli.main(["--provider", "bailian", "--model", name]), 0)
-            llm.generate.assert_awaited_once_with(LLMRequest([Message("user", "你好")]))
+            llm.generate.assert_awaited_once_with(LLMRequest(messages=[Message(role="user", content="你好")]))
             llm.aclose.assert_awaited_once()
             self.assertEqual(output.getvalue(), "hello\n")

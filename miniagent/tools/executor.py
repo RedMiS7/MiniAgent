@@ -1,34 +1,12 @@
 import asyncio
 import json
-import math
 import time
-from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import Callable
 
 from miniagent.models import ToolCall
 from .base import ToolContext, ToolError, ToolResult
+from .events import ToolCancelled, ToolCompleted, ToolEvent, ToolFailed, ToolStarted
 from .registry import ToolRegistry
-
-
-@dataclass(frozen=True)
-class ToolEvent:
-    type: Literal["started", "completed", "failed", "cancelled"]
-    call_id: str
-    tool_name: str
-    elapsed_seconds: float = 0.0
-    error_code: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.type not in ("started", "completed", "failed", "cancelled"):
-            raise ValueError("Unsupported tool event type.")
-        if any(not isinstance(value, str) or not value.strip() for value in (self.call_id, self.tool_name)):
-            raise ValueError("Tool call ID and name must be non-empty text.")
-        if (type(self.elapsed_seconds) not in (int, float)
-                or not math.isfinite(self.elapsed_seconds) or self.elapsed_seconds < 0):
-            raise ValueError("Tool elapsed time must be finite and non-negative.")
-        if self.error_code is not None:
-            if self.type != "failed" or not isinstance(self.error_code, str) or not self.error_code.strip():
-                raise ValueError("Only failed tool events carry a non-empty error code.")
 
 
 class ToolExecutor:
@@ -40,17 +18,21 @@ class ToolExecutor:
         self.context = context
         self.on_event = on_event
 
-    def _emit(self, event):
-        if self.on_event:
+    def _emit(self, event: ToolEvent, on_event=None):
+        for callback in (self.on_event, on_event):
+            if callback is None:
+                continue
             try:
-                self.on_event(event)
+                callback(event)
             except Exception:
                 # A display failure must not turn a completed write into a retry.
                 pass
 
-    async def execute(self, call: ToolCall) -> ToolResult:
+    async def execute(
+        self, call: ToolCall, *, on_event: Callable[[ToolEvent], None] | None = None,
+    ) -> ToolResult:
         start = time.monotonic()
-        self._emit(ToolEvent("started", call.id, call.name))
+        self._emit(ToolStarted(call_id=call.id, tool_name=call.name), on_event)
         try:
             if len(call.arguments.encode("utf-8")) > self.context.max_file_bytes * 8 + 65536:
                 raise ToolError("invalid_arguments", "Arguments exceed the size limit.")
@@ -64,18 +46,25 @@ class ToolExecutor:
             self.registry.validate(call.name, arguments)
             result = await tool.execute(arguments, self.context)
         except asyncio.CancelledError:
-            self._emit(ToolEvent("cancelled", call.id, call.name, time.monotonic() - start))
+            self._emit(ToolCancelled(
+                call_id=call.id, tool_name=call.name, elapsed_seconds=time.monotonic() - start,
+            ), on_event)
             raise
         except ToolError as exc:
-            result = ToolResult(False, error_code=exc.code, error_message=str(exc))
+            result = ToolResult(success=False, error_code=exc.code, error_message=str(exc))
         except (OSError, UnicodeError):
-            result = ToolResult(False, error_code="io_error", error_message="Tool I/O operation failed.")
+            result = ToolResult(success=False, error_code="io_error", error_message="Tool I/O operation failed.")
         except Exception:
-            result = ToolResult(False, error_code="execution_error", error_message="Tool execution failed.")
-        self._emit(ToolEvent(
-            "completed" if result.success else "failed", call.id, call.name,
-            time.monotonic() - start, result.error_code,
-        ))
+            result = ToolResult(success=False, error_code="execution_error", error_message="Tool execution failed.")
+        if result.success:
+            self._emit(ToolCompleted(
+                call_id=call.id, tool_name=call.name, elapsed_seconds=time.monotonic() - start,
+            ), on_event)
+        else:
+            self._emit(ToolFailed(
+                call_id=call.id, tool_name=call.name, elapsed_seconds=time.monotonic() - start,
+                error_code=result.error_code,
+            ), on_event)
         return result
 
     @staticmethod

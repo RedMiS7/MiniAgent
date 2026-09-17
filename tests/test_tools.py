@@ -8,7 +8,7 @@ import unittest
 
 from miniagent.bootstrap import create_tools
 from miniagent.models import ToolCall, ToolDefinition
-from miniagent.tools import ToolContent, ToolContext, ToolExecutor, ToolRegistry, ToolResult
+from miniagent.tools import ToolContent, ToolContext, ToolExecutor, ToolFailed, ToolRegistry, ToolResult
 
 
 class ToolsTests(unittest.IsolatedAsyncioTestCase):
@@ -21,7 +21,7 @@ class ToolsTests(unittest.IsolatedAsyncioTestCase):
         self.executor = ToolExecutor(self.registry, ToolContext(self.root), self.events.append)
 
     async def call(self, name, **args):
-        return await self.executor.execute(ToolCall("c", name, json.dumps(args)))
+        return await self.executor.execute(ToolCall(id="c", name=name, arguments=json.dumps(args)))
 
     async def test_registered_tools(self):
         self.assertEqual({d.name for d in self.registry.definitions()}, {
@@ -38,7 +38,7 @@ class ToolsTests(unittest.IsolatedAsyncioTestCase):
             ("read_file", '{"path":".","extra":1}', "invalid_arguments"),
             ("read_file", '{"path":".","start_line":true}', "invalid_arguments"),
         ]:
-            result = await self.executor.execute(ToolCall("c", name, args))
+            result = await self.executor.execute(ToolCall(id="c", name=name, arguments=args))
             self.assertFalse(result.success)
             self.assertEqual(result.error_code, code)
         self.assertFalse((self.root / "file").exists())
@@ -54,7 +54,7 @@ class ToolsTests(unittest.IsolatedAsyncioTestCase):
                                  new_text="world", expected_sha256=digest)
         self.assertTrue(result.success)
         self.assertEqual((self.root / "sample.txt").read_text(), "world\n")
-        self.assertEqual(self.events[-1].type, "completed")
+        self.assertEqual(self.events[-1].type, "tool_completed")
         self.assertEqual(result.to_message("c").tool_call_id, "c")
 
     async def test_overwrite_and_stale_hash_rejected(self):
@@ -127,17 +127,17 @@ class ToolsTests(unittest.IsolatedAsyncioTestCase):
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=5)
-        self.assertEqual(self.events[-1].type, "cancelled")
+        self.assertEqual(self.events[-1].type, "tool_cancelled")
 
     async def test_extension_without_executor_change(self):
         class Echo:
-            definition = ToolDefinition("echo", "Echo JSON.", {
+            definition = ToolDefinition(name="echo", description="Echo JSON.", parameters={
                 "type": "object", "properties": {"text": {"type": "string"}},
                 "required": ["text"], "additionalProperties": False,
             })
 
             async def execute(self, args, context):
-                return ToolResult(True, (ToolContent("text", args["text"]),))
+                return ToolResult(success=True, content=(ToolContent(type="text", value=args["text"]),))
         def register(registry):
             registry.register(Echo())
         register(self.registry)
@@ -149,14 +149,14 @@ class ToolsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_executor_event_lifecycle(self):
         for outcome, terminal, code in [
-            (ToolResult(True), "completed", None),
-            (ToolResult(False, error_code="rejected", error_message="Rejected."), "failed", "rejected"),
+            (ToolResult(success=True), "completed", None),
+            (ToolResult(success=False, error_code="rejected", error_message="Rejected."), "failed", "rejected"),
             (RuntimeError("private detail"), "failed", "execution_error"),
             (asyncio.CancelledError(), "cancelled", None),
         ]:
             with self.subTest(terminal=terminal, code=code):
                 class Example:
-                    definition = ToolDefinition("example", "Test tool.", {"type": "object"})
+                    definition = ToolDefinition(name="example", description="Test tool.", parameters={"type": "object"})
 
                     async def execute(self, args, context):
                         if isinstance(outcome, BaseException):
@@ -167,17 +167,20 @@ class ToolsTests(unittest.IsolatedAsyncioTestCase):
                 registry.register(Example())
                 events = []
                 executor = ToolExecutor(registry, ToolContext(self.root), events.append)
-                call = ToolCall("example-call", "example", "{}")
+                call = ToolCall(id="example-call", name="example", arguments="{}")
                 if terminal == "cancelled":
                     with self.assertRaises(asyncio.CancelledError):
                         await executor.execute(call)
                 else:
                     result = await executor.execute(call)
                     self.assertEqual(result.success, terminal == "completed")
-                self.assertEqual([event.type for event in events], ["started", terminal])
+                self.assertEqual([event.type for event in events], ["tool_started", "tool_" + terminal])
                 self.assertTrue(all(event.call_id == call.id for event in events))
                 self.assertTrue(all(event.tool_name == call.name for event in events))
-                self.assertEqual(events[-1].error_code, code)
+                if isinstance(events[-1], ToolFailed):
+                    self.assertEqual(events[-1].error_code, code)
+                else:
+                    self.assertFalse(hasattr(events[-1], "error_code"))
                 self.assertGreaterEqual(events[-1].elapsed_seconds, 0)
                 self.assertNotIn("private detail", repr(events))
 

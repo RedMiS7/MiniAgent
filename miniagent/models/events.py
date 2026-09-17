@@ -1,50 +1,36 @@
-from dataclasses import dataclass
-from typing import Union
+"""Typed model-stream events with stable serialization tags."""
+from typing import Annotated, Literal, Union
 
+from pydantic import Field
+
+from miniagent._validation import ContractModel
 from .types import LLMResponse
 
 
-@dataclass(frozen=True)
-class TextDelta:
+class TextDelta(ContractModel):
+    type: Literal["llm_text_delta"] = "llm_text_delta"
     text: str
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.text, str):
-            raise ValueError("Text delta must be text.")
+
+class ToolCallStarted(ContractModel):
+    type: Literal["llm_tool_call_started"] = "llm_tool_call_started"
+    index: int = Field(ge=0)
+    id: str = Field(pattern=r"\S")
+    name: str = Field(pattern=r"\S")
 
 
-@dataclass(frozen=True)
-class ToolCallStarted:
-    index: int
-    id: str
-    name: str
-
-    def __post_init__(self) -> None:
-        if type(self.index) is not int or self.index < 0:
-            raise ValueError("Tool call index must be a non-negative integer.")
-        if any(not isinstance(value, str) or not value.strip() for value in (self.id, self.name)):
-            raise ValueError("Tool call ID and name must be non-empty text.")
-
-
-@dataclass(frozen=True)
-class ToolArgumentsDelta:
-    index: int
+class ToolArgumentsDelta(ContractModel):
+    type: Literal["llm_tool_arguments_delta"] = "llm_tool_arguments_delta"
+    index: int = Field(ge=0)
     delta: str
 
-    def __post_init__(self) -> None:
-        if type(self.index) is not int or self.index < 0:
-            raise ValueError("Tool call index must be a non-negative integer.")
-        if not isinstance(self.delta, str):
-            raise ValueError("Tool arguments delta must be text.")
 
-
-@dataclass(frozen=True)
-class ResponseCompleted:
+class ResponseCompleted(ContractModel):
+    type: Literal["llm_response_completed"] = "llm_response_completed"
     response: LLMResponse
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.response, LLMResponse):
-            raise ValueError("Response completion requires an LLMResponse.")
 
-
-LLMEvent = Union[TextDelta, ToolCallStarted, ToolArgumentsDelta, ResponseCompleted]
+LLMEvent = Annotated[
+    Union[TextDelta, ToolCallStarted, ToolArgumentsDelta, ResponseCompleted],
+    Field(discriminator="type"),
+]

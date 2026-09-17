@@ -1,5 +1,13 @@
 """Single-agent contracts and execution components."""
 
-from .events import AgentEvent, RunEvent
+from .events import (
+    AgentCancelled, AgentCompleted, AgentEvent, AgentFailed, AgentProgress, AgentStarted,
+)
 
-__all__ = ["AgentEvent", "RunEvent"]
+from .loop import AgentLoop, LoopEvent
+
+__all__ = [
+    "AgentLoop", "LoopEvent",
+    "AgentEvent", "AgentStarted", "AgentProgress", "AgentCompleted",
+    "AgentFailed", "AgentCancelled",
+]

@@ -50,7 +50,7 @@ class ImageToolTests(unittest.IsolatedAsyncioTestCase):
         self.executor = ToolExecutor(self.registry, ToolContext(self.root))
 
     async def call(self, **arguments):
-        return await self.executor.execute(ToolCall("call", "image", json.dumps(arguments)))
+        return await self.executor.execute(ToolCall(id="call", name="image", arguments=json.dumps(arguments)))
 
     async def test_default_current_inspection(self):
         result = await self.call(action="inspect", path="input.png", prompt="describe")

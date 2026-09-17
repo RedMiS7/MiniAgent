@@ -1,7 +1,10 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Literal, Protocol
 
+from pydantic import Field, JsonValue, field_validator, model_validator
+
+from miniagent._validation import ContractModel
 from miniagent.models import Message, ToolDefinition
 
 
@@ -41,18 +44,38 @@ class ToolContext:
         return resolved
 
 
-@dataclass(frozen=True)
-class ToolContent:
+class ToolContent(ContractModel):
     type: Literal["text", "json"]
-    value: Any = field(repr=False)
+    value: JsonValue = Field(repr=False)
+
+    @model_validator(mode="after")
+    def validate_content(self):
+        import json
+        if self.type == "text" and not isinstance(self.value, str):
+            raise ValueError("Text tool content must be text.")
+        try:
+            json.dumps(self.value, allow_nan=False)
+        except (ValueError, TypeError):
+            raise ValueError("Tool content must be JSON serializable.") from None
+        return self
 
 
-@dataclass(frozen=True)
-class ToolResult:
+class ToolResult(ContractModel):
     success: bool
     content: tuple[ToolContent, ...] = ()
-    error_code: str | None = None
+    error_code: str | None = Field(default=None, pattern=r"\S")
     error_message: str | None = None
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def normalize_content(cls, value):
+        return tuple(value) if isinstance(value, list) else value
+
+    @model_validator(mode="after")
+    def validate_status(self):
+        if self.success and (self.error_code is not None or self.error_message is not None):
+            raise ValueError("Successful tool results cannot carry error fields.")
+        return self
 
     def to_message(self, call_id: str) -> Message:
         import json
@@ -62,7 +85,8 @@ class ToolResult:
         }
         if not self.success:
             payload["error"] = {"code": self.error_code, "message": self.error_message}
-        return Message("tool", json.dumps(payload, ensure_ascii=False), tool_call_id=call_id)
+        return Message(role="tool", content=json.dumps(payload, ensure_ascii=False, allow_nan=False),
+                       tool_call_id=call_id)
 
 
 class Tool(Protocol):

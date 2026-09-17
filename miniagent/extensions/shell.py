@@ -37,7 +37,7 @@ async def _capture(reader, limit):
 
 
 class CommandTool:
-    definition = ToolDefinition("run_command", "Run an executable with arguments; no implicit shell.", {
+    definition = ToolDefinition(name="run_command", description="Run an executable with arguments; no implicit shell.", parameters={
         "type": "object",
         "properties": {
             "argv": {"type": "array", "minItems": 1, "maxItems": 128,
@@ -87,7 +87,7 @@ class CommandTool:
             "truncated": output[0][1] or output[1][1],
         }
         return ToolResult(
-            process.returncode == 0, (ToolContent("json", data),),
+            success=process.returncode == 0, content=(ToolContent(type="json", value=data),),
             error_code="command_failed" if process.returncode else None,
             error_message="Command exited with a nonzero status." if process.returncode else None,
         )

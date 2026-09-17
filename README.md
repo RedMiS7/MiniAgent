@@ -72,6 +72,11 @@ Agent / CLI
 
 公共接口已从 Model.generate(messages) 迁移到 LLM.generate(LLMRequest)；
 ModelResponse / ModelError 替换为 LLMResponse / LLMError，不保留两套协议。
+核心数据类型（模型请求/响应、消息、工具调用、ToolContent 和 ToolResult）使用 Pydantic v2，构造时使用关键字参数。
+非法数据抛出 `pydantic.ValidationError`；模型服务调用失败仍由适配层抛出 `LLMError`。
+列表形式的消息、工具定义及结果内容会规范化为 tuple；字段禁止重新赋值，但内部 JSON 容器并非深层不可变。
+工具 CLI 使用 `model_dump()` 输出定义；工具结果回传继续使用 `to_message(call.id)`，保持原有 JSON 格式。
+迁移范围与兼容性见 [P3.1 迁移说明](docs/p3-1-pydantic-core-types.md)。
 
 入口负责创建模型并把 LLM 实例注入上层；以下业务函数无需知道提供商：
 
@@ -80,7 +85,7 @@ from miniagent.models import LLM, LLMRequest, Message, GenerationOptions
 
 async def ask(llm: LLM):
     request = LLMRequest(
-        messages=[Message("user", "你好")],
+        messages=[Message(role="user", content="你好")],
         options=GenerationOptions(reasoning="high", max_output_tokens=4096),
     )
     response = await llm.generate(request)
@@ -126,7 +131,7 @@ async def main():
 ```python
 from miniagent.models import LLMRequest, Message, ToolDefinition
 
-messages = [Message("user", "北京天气如何？")]
+messages = [Message(role="user", content="北京天气如何？")]
 tools = [ToolDefinition(
     name="weather",
     description="查询天气",
@@ -136,14 +141,14 @@ tools = [ToolDefinition(
         "required": ["city"],
     },
 )]
-response = await llm.generate(LLMRequest(messages, tools))
+response = await llm.generate(LLMRequest(messages=messages, tools=tools))
 if response.finish_reason == "tool_calls":
     messages.append(response.message)  # 原样保存，包括 continuation
     # 工具执行器先解析 arguments JSON、校验 schema 和权限，再执行工具。
     for call in response.message.tool_calls:
         result_text = await execute_validated_tool(call)
-        messages.append(Message("tool", result_text, tool_call_id=call.id))
-    response = await llm.generate(LLMRequest(messages, tools))
+        messages.append(Message(role="tool", content=result_text, tool_call_id=call.id))
+    response = await llm.generate(LLMRequest(messages=messages, tools=tools))
 ```
 
 示例中的 execute_validated_tool 是上层应用需要实现的函数，本项目不执行工具。
@@ -235,7 +240,7 @@ OpenAI Responses 的转换保持独立。
 
 ## Tools 与 extensions（第一版）
 
-本版提供工具注册与执行层，尚未加入 Agent 自动循环，也没有 MCP 客户端。
+本版提供工具注册与执行层；Agent 自动循环见下文 agent_cli.py，尚无 MCP 客户端。
 模型层和原有 cli.py 保持原来的职责；tools_cli.py 可独立测试工具，无需 API Key。
 
 - tools/base.py：异步 Tool 接口、ToolContext、ToolResult、文本/JSON 内容。
@@ -253,7 +258,7 @@ python tools_cli.py --list
 python tools_cli.py --workspace . --tool list_files --arguments-file tool-args.json
 ```
 
-tools_cli 的 stderr 显示 started/completed/failed/cancelled、工具名和耗时，
+tools_cli 的 stderr 显示 tool_started/tool_completed/tool_failed/tool_cancelled 和工具名，终态事件另显示耗时，
 stdout 输出本次工具的 JSON 结果。成功退出 0，执行失败 1，CLI 参数错误 2，取消 130。
 参数文件可放任意位置，由用户明确指定；其内容经过工具 Schema 校验。
 
@@ -292,14 +297,14 @@ from miniagent.tools import ToolContext, ToolExecutor
 
 registry = create_tools()
 executor = ToolExecutor(registry, ToolContext(Path(".")), on_event=print)
-request = LLMRequest([Message("user", "查看目录")], tools=registry.definitions())
+request = LLMRequest(messages=[Message(role="user", content="查看目录")], tools=registry.definitions())
 response = await llm.generate(request)
 if response.finish_reason == "tool_calls":
     messages = [*request.messages, response.message]
     for call in response.message.tool_calls:
         result = await executor.execute(call)
         messages.append(result.to_message(call.id))
-    # messages 可用于下一次模型调用；完整 Agent 循环在后续实现。
+    # messages 可用于下一次模型调用；自动循环使用 miniagent.agent.AgentLoop。
 ```
 
 新增 extension 只需实现异步 Tool，并暴露 register(registry)：
@@ -309,7 +314,7 @@ from miniagent.models import ToolDefinition
 from miniagent.tools import ToolContent, ToolResult
 
 class EchoTool:
-    definition = ToolDefinition("echo", "返回文本", {
+    definition = ToolDefinition(name="echo", description="返回文本", parameters={
         "type": "object",
         "properties": {"text": {"type": "string", "description": "需要原样返回的文本"}},
         "required": ["text"],
@@ -317,7 +322,7 @@ class EchoTool:
     })
 
     async def execute(self, arguments, context):
-        return ToolResult(True, (ToolContent("text", arguments["text"]),))
+        return ToolResult(success=True, content=(ToolContent(type="text", value=arguments["text"]),))
 
 def register(registry):
     registry.register(EchoTool())
@@ -367,7 +372,7 @@ ToolCall 的 model 参数省略或为 current 时，绑定 current 配置。
 available_models 只包含已配置且该操作有适配能力的备选模型，不保证账号权限。
 Agent 可明确指定其中一个重试，或向用户解释无法完成。工具绝不自动回退。
 鉴权、限流、超时等错误也会统一返回；不会把所有失败都误报成模型能力不足。
-当前没有 Agent 自动循环，只实现了供 Agent 决策的工具结果和显式选择入口。
+agent_cli.py 已接入 Agent 自动循环；图片工具继续沿用显式模型选择规则。
 
 当前适配能力（按精确 provider/model ID 校验，未知组合保守拒绝）：
 
@@ -414,3 +419,38 @@ python tools_cli.py --provider bailian --model qwen3.7-plus --image-model bailia
 [百炼视觉理解](https://help.aliyun.com/zh/model-studio/vision)、
 [百炼 Qwen-Image](https://help.aliyun.com/zh/model-studio/qwen-image-api)、
 [DeepSeek 视觉](https://api-docs.deepseek.com/guides/vision/)。
+
+事件统一使用独立 Pydantic 类型和固定 type 标识，具体类用关键字参数构造；LLMEvent、ToolEvent、AgentEvent 是按 type 区分的联合类型。详见 [事件契约](docs/p3-2-event-contract.md)。
+
+## Agent Loop：在 CLI 输入任务
+
+配置上文对应提供商的 API Key 环境变量后，在项目目录运行：
+
+```powershell
+python agent_cli.py --provider deepseek --model deepseek-flash --workspace .
+```
+
+出现 `你>` 后，例如输入：
+
+```text
+先列出当前目录，再读取 README.md，用中文总结这个项目的用途。
+```
+
+CLI 自动循环调用模型和工具，显示每一轮模型请求、工具名、文件工具的目标路径、执行状态和耗时，
+逐段输出模型文本，最后明确显示“任务完成”或“未完成”。过程提示写 stderr，模型文本写 stdout。
+文件工具（list_files/read_file/write_file/edit_file）显示相对于工作目录的 path，默认隐藏内部调用 ID。
+不会默认打印完整工具参数和工具结果；非法或缺失路径时仅显示工具名，实际执行校验仍由执行器负责。模型文本可能包含中间说明，成功以 Agent 终态为准。
+
+- 默认持续多轮对话；`--prompt "任务内容"` 保持单次执行，`--system` 指定指令。
+- `--max-steps` 默认 12 次模型调用；最后一轮仍要求工具时停止，不继续执行工具。
+- `--allow-commands` 明确启用命令工具；默认禁止。文件工具沿用既有工作目录内读写能力。
+- 支持 `--timeout`、`--max-retries`、`--max-output-tokens`、`--reasoning`、`--temperature`。
+- 每次回答后可继续输入，保留完整消息、工具结果与模型续接状态；输入 `/exit` 或 EOF 退出，空输入忽略，Ctrl+C 取消并退出。
+- 历史仅保存在当前进程内。每次输入重新计算轮数上限；任务失败或中断会结束会话，不能直接续接未完成历史。
+- 退出码：成功 0，任务失败 1，配置/输入错误 2，取消 130。
+
+也可以选择 `--provider bailian --model qwen3.7-plus` 或账号可用的其他已支持配置；
+使用真实 API 会产生调用费用。原 `cli.py` 继续用于单次模型接口验证。
+
+实现和边界见 [P4 Agent Loop](docs/p4-agent-loop.md) 和 [CLI 多轮对话](docs/cli-multiturn-conversation.md)。离线验证：
+`python -m unittest discover -s tests -q`。

@@ -55,11 +55,11 @@ class ChatCompletionsAdapter(ABC):
         continuation = None
         if state is not None:
             continuation = ContinuationState(
-                self._provider, self._model, json.dumps(require_text(state)),
+                provider=self._provider, model=self._model, payload=json.dumps(require_text(state)),
             )
         return LLMResponse(
-            Message("assistant", text, tuple(calls), continuation=continuation, refusal=refusal),
-            finish, usage_from(data.get("usage"), "prompt_tokens", "completion_tokens"),
+            message=Message(role="assistant", content=text, tool_calls=tuple(calls), continuation=continuation, refusal=refusal),
+            finish_reason=finish, usage=usage_from(data.get("usage"), "prompt_tokens", "completion_tokens"),
         )
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
@@ -93,7 +93,7 @@ class ChatCompletionsAdapter(ABC):
                         if delta.get("content") is not None:
                             part = require_text(delta["content"])
                             text.append(part)
-                            yield TextDelta(part)
+                            yield TextDelta(text=part)
                         if delta.get("reasoning_content") is not None:
                             has_reasoning = True
                             reasoning.append(require_text(delta["reasoning_content"]))
@@ -121,11 +121,11 @@ class ChatCompletionsAdapter(ABC):
                             call["function"]["arguments"] += arguments
                             if index not in started and call["id"] and call["function"]["name"]:
                                 started.add(index)
-                                yield ToolCallStarted(index, call["id"], call["function"]["name"])
+                                yield ToolCallStarted(index=index, id=call["id"], name=call["function"]["name"])
                                 if call["function"]["arguments"]:
-                                    yield ToolArgumentsDelta(index, call["function"]["arguments"])
+                                    yield ToolArgumentsDelta(index=index, delta=call["function"]["arguments"])
                             elif index in started and arguments:
-                                yield ToolArgumentsDelta(index, arguments)
+                                yield ToolArgumentsDelta(index=index, delta=arguments)
                         if choice.get("finish_reason") is not None:
                             finish = choice["finish_reason"]
                 if finish is None or set(calls) != started:
@@ -138,7 +138,7 @@ class ChatCompletionsAdapter(ABC):
                 result = self._response({
                     "choices": [{"message": message, "finish_reason": finish}], "usage": usage,
                 })
-                yield ResponseCompleted(result)
+                yield ResponseCompleted(response=result)
             finally:
                 await stream.close()
 
