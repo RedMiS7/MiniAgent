@@ -41,8 +41,10 @@ class CommandTool:
         "type": "object",
         "properties": {
             "argv": {"type": "array", "minItems": 1, "maxItems": 128,
+                     "description": "Executable followed by separate arguments, e.g. [python, --version]. No implicit shell expansion.",
                      "items": {"type": "string", "minLength": 1}},
-            "cwd": {"type": "string", "minLength": 1},
+            "cwd": {"type": "string", "minLength": 1,
+                    "description": "Workspace-relative working directory. Defaults to the workspace root."},
         },
         "required": ["argv"], "additionalProperties": False,
     })

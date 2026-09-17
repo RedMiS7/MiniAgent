@@ -5,10 +5,6 @@ import os
 from miniagent.models import ToolDefinition
 from miniagent.tools import ToolContent, ToolError, ToolResult
 
-PATH = {"type": "string", "minLength": 1}
-TEXT = {"type": "string"}
-HASH = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-
 
 def _read(path, context):
     with path.open("rb") as source:
@@ -98,8 +94,12 @@ class ListFilesTool(FileTool):
         name="list_files",
         description="List a workspace directory.",
         parameters={
-            "type": "object", "properties": {"path": PATH},
-            "required": ["path"], "additionalProperties": False,
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace-relative directory path to list; use . for the root.", "minLength": 1},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
         },
     )
 
@@ -111,8 +111,9 @@ class ReadFileTool(FileTool):
         parameters={
             "type": "object",
             "properties": {
-                "path": PATH, "start_line": {"type": "integer", "minimum": 1},
-                "line_count": {"type": "integer", "minimum": 1, "maximum": 1000},
+                "path": {"type": "string", "description": "Workspace-relative path to the UTF-8 file to read.", "minLength": 1},
+                "start_line": {"type": "integer", "description": "First line to read, numbered from 1. Defaults to 1.", "minimum": 1},
+                "line_count": {"type": "integer", "description": "Maximum number of lines to read. Defaults to 200.", "minimum": 1, "maximum": 1000},
             },
             "required": ["path"], "additionalProperties": False,
         },
@@ -124,7 +125,11 @@ class WriteFileTool(FileTool):
         name="write_file",
         description="Create a UTF-8 file; never overwrite.",
         parameters={
-            "type": "object", "properties": {"path": PATH, "content": TEXT},
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace-relative path to the new file to write. Parent directory must exist.", "minLength": 1},
+                "content": {"type": "string", "description": "Full text content to write as UTF-8."},
+            },
             "required": ["path", "content"], "additionalProperties": False,
         },
     )
@@ -137,8 +142,10 @@ class EditFileTool(FileTool):
         parameters={
             "type": "object",
             "properties": {
-                "path": PATH, "old_text": {"type": "string", "minLength": 1},
-                "new_text": TEXT, "expected_sha256": HASH,
+                "path": {"type": "string", "description": "Workspace-relative path to the existing UTF-8 file to edit.", "minLength": 1},
+                "old_text": {"type": "string", "description": "Exact text to replace; must occur exactly once in the file.", "minLength": 1},
+                "new_text": {"type": "string", "description": "Replacement text; use an empty string to remove old_text."},
+                "expected_sha256": {"type": "string", "description": "SHA-256 returned by read_file, used to detect changes since reading.", "pattern": "^[0-9a-f]{64}$"},
             },
             "required": ["path", "old_text", "new_text", "expected_sha256"],
             "additionalProperties": False,

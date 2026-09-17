@@ -147,6 +147,40 @@ class ToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private", repr(self.events))
         self.assertNotIn("private", repr(result))
 
+    async def test_executor_event_lifecycle(self):
+        for outcome, terminal, code in [
+            (ToolResult(True), "completed", None),
+            (ToolResult(False, error_code="rejected", error_message="Rejected."), "failed", "rejected"),
+            (RuntimeError("private detail"), "failed", "execution_error"),
+            (asyncio.CancelledError(), "cancelled", None),
+        ]:
+            with self.subTest(terminal=terminal, code=code):
+                class Example:
+                    definition = ToolDefinition("example", "Test tool.", {"type": "object"})
+
+                    async def execute(self, args, context):
+                        if isinstance(outcome, BaseException):
+                            raise outcome
+                        return outcome
+
+                registry = ToolRegistry()
+                registry.register(Example())
+                events = []
+                executor = ToolExecutor(registry, ToolContext(self.root), events.append)
+                call = ToolCall("example-call", "example", "{}")
+                if terminal == "cancelled":
+                    with self.assertRaises(asyncio.CancelledError):
+                        await executor.execute(call)
+                else:
+                    result = await executor.execute(call)
+                    self.assertEqual(result.success, terminal == "completed")
+                self.assertEqual([event.type for event in events], ["started", terminal])
+                self.assertTrue(all(event.call_id == call.id for event in events))
+                self.assertTrue(all(event.tool_name == call.name for event in events))
+                self.assertEqual(events[-1].error_code, code)
+                self.assertGreaterEqual(events[-1].elapsed_seconds, 0)
+                self.assertNotIn("private detail", repr(events))
+
     async def test_event_observer_failure_does_not_repeat_write(self):
         def broken(event):
             raise RuntimeError("display unavailable")

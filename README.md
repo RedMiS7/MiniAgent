@@ -132,7 +132,7 @@ tools = [ToolDefinition(
     description="查询天气",
     parameters={
         "type": "object",
-        "properties": {"city": {"type": "string"}},
+        "properties": {"city": {"type": "string", "description": "City to get weather for."}},
         "required": ["city"],
     },
 )]
@@ -311,7 +311,7 @@ from miniagent.tools import ToolContent, ToolResult
 class EchoTool:
     definition = ToolDefinition("echo", "返回文本", {
         "type": "object",
-        "properties": {"text": {"type": "string"}},
+        "properties": {"text": {"type": "string", "description": "需要原样返回的文本"}},
         "required": ["text"],
         "additionalProperties": False,
     })

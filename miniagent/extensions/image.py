@@ -24,11 +24,16 @@ class ImageTool:
         parameters={
             "type": "object",
             "properties": {
-                "action": {"enum": ["inspect", "generate"]},
-                "prompt": {"type": "string", "minLength": 1},
-                "path": {"type": "string", "minLength": 1},
-                "output_path": {"type": "string", "minLength": 1},
-                "model": {"type": "string", "minLength": 1},
+                "action": {"type": "string", "enum": ["inspect", "generate"],
+                           "description": "Use inspect to analyze an existing image or generate to create a PNG."},
+                "prompt": {"type": "string", "minLength": 1,
+                           "description": "Question about the input image, or description of the image to generate."},
+                "path": {"type": "string", "minLength": 1,
+                         "description": "Workspace-relative PNG, JPEG or WebP input path. Required only for inspect."},
+                "output_path": {"type": "string", "minLength": 1,
+                                "description": "Workspace-relative new .png output path. Required only for generate; parent directory must exist."},
+                "model": {"type": "string", "minLength": 1,
+                          "description": "Configured model alias. Defaults to current; select an available_models alias from a failure result to retry explicitly."},
             },
             "required": ["action", "prompt"], "additionalProperties": False,
             "oneOf": [

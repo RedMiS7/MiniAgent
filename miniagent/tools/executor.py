@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import time
 from dataclasses import dataclass
 from typing import Callable, Literal
@@ -16,6 +17,18 @@ class ToolEvent:
     tool_name: str
     elapsed_seconds: float = 0.0
     error_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.type not in ("started", "completed", "failed", "cancelled"):
+            raise ValueError("Unsupported tool event type.")
+        if any(not isinstance(value, str) or not value.strip() for value in (self.call_id, self.tool_name)):
+            raise ValueError("Tool call ID and name must be non-empty text.")
+        if (type(self.elapsed_seconds) not in (int, float)
+                or not math.isfinite(self.elapsed_seconds) or self.elapsed_seconds < 0):
+            raise ValueError("Tool elapsed time must be finite and non-negative.")
+        if self.error_code is not None:
+            if self.type != "failed" or not isinstance(self.error_code, str) or not self.error_code.strip():
+                raise ValueError("Only failed tool events carry a non-empty error code.")
 
 
 class ToolExecutor:
