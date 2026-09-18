@@ -101,5 +101,22 @@ class RunTypesTests(unittest.TestCase):
         self.assertNotIn("private-diagnostic", repr(failure))
 
 
+
+    def test_cleanup_diagnostic_round_trips_for_failure_and_cancellation(self):
+        for status, reason in (("failed", "model_error"), ("cancelled", "cancelled")):
+            result = RunResult(status=status, reason=reason, cleanup_error="Cleanup failed.")
+            self.assertEqual(RunResult.model_validate_json(result.model_dump_json()), result)
+            self.assertNotIn("Cleanup failed.", repr(result))
+            self.assertIsNone(result.error_code)
+
+    def test_cleanup_failure_cannot_be_success_or_invalid_diagnostic(self):
+        for diagnostic in ("Cleanup failed.", "", 123):
+            with self.subTest(diagnostic=diagnostic), self.assertRaises(ValidationError):
+                RunResult(status="succeeded", reason="stop",
+                          messages=(Message(role="assistant", content="Done"),),
+                          cleanup_error=diagnostic)
+        with self.assertRaises(ValidationError):
+            RunResult(status="failed", reason="execution_error", cleanup_error=" ")
+
 if __name__ == "__main__":
     unittest.main()

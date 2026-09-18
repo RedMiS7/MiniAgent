@@ -30,6 +30,7 @@ result = RunResult(
 | reason | 非空结束原因；成功只能为 stop，取消只能为 cancelled |
 | messages | 成功历史，复用现有 Message；失败和取消只能为空 |
 | error_code / error_message | 可选错误码和摘要，必须同时提供，只允许在 failed 中使用 |
+| cleanup_error | Runtime 显式流关闭失败的可选安全摘要，只允许 failed / cancelled 携带；原失败原因保持不变 |
 
 失败原因沿用 AgentFailed 的非空字符串形式，以容纳模型非成功结束原因与执行故障，不额外维护一套完整枚举；拒绝 stop、cancelled 和中间阶段 tool_calls。step_limit、length、refusal、content_filter 可不带异常摘要；model_error 和 execution_error 可附错误码与摘要。只有失败事件而没有异常详情时，也能表达失败结果。
 

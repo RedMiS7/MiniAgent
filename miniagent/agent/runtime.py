@@ -1,6 +1,6 @@
 """Scoped, single-run execution and terminal result ownership around AgentLoop."""
 import asyncio
-from contextlib import aclosing, asynccontextmanager
+from contextlib import asynccontextmanager
 from typing import AsyncIterator, Sequence
 
 from miniagent.models import GenerationOptions, LLMError, Message
@@ -26,6 +26,7 @@ class AgentRuntime:
         self._ready = asyncio.Event()
         self._event: LoopEvent | None = None
         self._error: BaseException | None = None
+        self._cleanup_error: Exception | None = None
 
     @property
     def result(self) -> RunResult | None:
@@ -54,8 +55,12 @@ class AgentRuntime:
         self._started = True
         self._scope_active = True
         self._task = asyncio.create_task(self._execute(messages, options, max_steps))
+        body_error = None
         try:
             yield self
+        except BaseException as exc:
+            body_error = exc
+            raise
         finally:
             self.cancel()
             interrupted = False
@@ -68,9 +73,14 @@ class AgentRuntime:
             self._scope_active = False
             self._task.result()
             if interrupted:
-                raise asyncio.CancelledError()
-            if self._error is not None and not isinstance(self._error, asyncio.CancelledError):
-                raise self._error
+                raise asyncio.CancelledError() from (self._cleanup_error or body_error)
+            if body_error is not None:
+                if self._cleanup_error is not None:
+                    raise body_error from self._cleanup_error
+            elif self._error is not None and (
+                not isinstance(self._error, asyncio.CancelledError) or self._cleanup_error is not None
+            ):
+                self._raise_error()
 
     async def events(self) -> AsyncIterator[LoopEvent]:
         """Consume once, with at most one event in flight and no read-ahead calls."""
@@ -82,7 +92,7 @@ class AgentRuntime:
                 raise RuntimeError("The Run scope is closed.")
             if self._result is not None and self._event is None:
                 if self._error is not None:
-                    raise self._error
+                    self._raise_error()
                 return
             self._demand.set()
             await self._ready.wait()
@@ -102,6 +112,11 @@ class AgentRuntime:
                 pass
         return self._result
 
+    def _raise_error(self):
+        if self._cleanup_error is not None and self._error is not self._cleanup_error:
+            raise self._error from self._cleanup_error
+        raise self._error
+
     def _check_cancelled(self):
         if self._cancel_requested:
             raise asyncio.CancelledError()
@@ -110,38 +125,42 @@ class AgentRuntime:
         self._worker_entered = True
         terminal = None
         try:
-            async with aclosing(self._loop.stream(messages, options, max_steps=max_steps)) as events:
-                try:
-                    while terminal is None:
-                        self._check_cancelled()
-                        await self._demand.wait()
-                        self._demand.clear()
-                        self._check_cancelled()
-                        try:
-                            event = await anext(events)
-                        except StopAsyncIteration:
-                            raise RuntimeError("Loop returned no terminal event.") from None
-                        self._check_cancelled()
-                        if isinstance(event, AgentCompleted):
-                            terminal = RunResult(status="succeeded", reason=event.reason,
-                                                 messages=event.messages)
-                        elif isinstance(event, AgentFailed):
-                            terminal = RunResult(status="failed", reason=event.reason)
-                        elif isinstance(event, AgentCancelled):
-                            terminal = RunResult(status="cancelled", reason=event.reason)
-                        else:
-                            self._event = event
-                            self._ready.set()
-                    self._closing = True
-                    # Finish cleanup and collect any exception before exposing a terminal event.
+            events = self._loop.stream(messages, options, max_steps=max_steps)
+            try:
+                while terminal is None:
+                    self._check_cancelled()
+                    await self._demand.wait()
+                    self._demand.clear()
+                    self._check_cancelled()
                     try:
-                        await anext(events)
+                        event = await anext(events)
                     except StopAsyncIteration:
-                        pass
+                        raise RuntimeError("Loop returned no terminal event.") from None
+                    self._check_cancelled()
+                    if isinstance(event, AgentCompleted):
+                        terminal = RunResult(status="succeeded", reason=event.reason,
+                                             messages=event.messages)
+                    elif isinstance(event, AgentFailed):
+                        terminal = RunResult(status="failed", reason=event.reason)
+                    elif isinstance(event, AgentCancelled):
+                        terminal = RunResult(status="cancelled", reason=event.reason)
                     else:
-                        raise RuntimeError("Events followed the Loop's terminal event.")
-                finally:
-                    self._closing = True
+                        self._event = event
+                        self._ready.set()
+                self._closing = True
+                # Finish cleanup and collect any exception before exposing a terminal event.
+                try:
+                    await anext(events)
+                except StopAsyncIteration:
+                    pass
+                else:
+                    raise RuntimeError("Events followed the Loop's terminal event.")
+            finally:
+                self._closing = True
+                try:
+                    await events.aclose()
+                except Exception as exc:
+                    self._cleanup_error = exc
             self._check_cancelled()
             if terminal.status == "cancelled":
                 raise asyncio.CancelledError()
@@ -158,6 +177,15 @@ class AgentRuntime:
                                      error_code="execution_error", error_message="Run execution failed.")
         else:
             self._result = terminal
+        if self._cleanup_error is not None:
+            data = self._result.model_dump()
+            if self._result.status == "succeeded":
+                data.update(status="failed", reason="execution_error", messages=(),
+                            error_code="execution_error", error_message="Run cleanup failed.")
+            data["cleanup_error"] = "Run stream cleanup failed."
+            self._result = RunResult(**data)
+            if self._error is None:
+                self._error = self._cleanup_error
         if self._result.status == "succeeded":
             self._event = AgentCompleted(messages=self._result.messages)
         elif self._result.status == "cancelled":

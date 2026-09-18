@@ -76,4 +76,4 @@ python -m unittest discover -s tests -q：全部 142 项通过，其中 Runtime 
 
 任意工具或模型内部需要配合取消及正确实现自己的 finally；不能保证强制终止阻塞代码，也不承诺回滚副作用。Runtime 的关闭阶段保护不替代第三方组件自身的取消安全。
 
-执行故障与清理故障同时发生时仍采用原 Loop / Python 异常链，RunResult 只摘要最终传播出的异常。完整双重故障交付和 P5 整体验收留到下一小任务；本次不勾选 P5 完成。
+Runtime 显式关闭流时的双重故障现已保留原始失败或取消，并在 RunResult.cleanup_error 中附安全摘要，详见 p5-runtime-cleanup-failures.md。Loop 内部模型流关闭边界仍待修复，P5 整体验收尚未完成。

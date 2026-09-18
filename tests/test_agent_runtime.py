@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 import miniagent.agent as agent
-from miniagent.agent import AgentCompleted, AgentLoop, AgentRuntime, AgentStarted
+from miniagent.agent import AgentCompleted, AgentFailed, AgentLoop, AgentRuntime, AgentStarted
 from miniagent.models import (
     ContinuationState, GenerationOptions, LLMError, LLMResponse, Message,
     ResponseCompleted, TextDelta, ToolCall, ToolDefinition,
@@ -668,6 +668,183 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     self.assertIs(caught, expected_error)
 
+
+
+    async def test_execution_error_survives_stream_close_error(self):
+        for primary in (LLMError("connection", "private-primary"), RuntimeError("private-primary")):
+            with self.subTest(primary=type(primary).__name__):
+                cleanup = RuntimeError("private-cleanup")
+
+                class BrokenStream:
+                    def __aiter__(self):
+                        return self
+
+                    async def __anext__(self):
+                        raise primary
+
+                    async def aclose(self):
+                        raise cleanup
+
+                class BrokenLoop:
+                    def stream(self, messages, options, *, max_steps):
+                        return BrokenStream()
+
+                runtime = AgentRuntime(BrokenLoop())
+                events = []
+                with self.assertRaises(type(primary)) as caught:
+                    async with runtime.stream(self.messages) as run:
+                        async for event in run.events():
+                            events.append(event)
+                self.assertIs(caught.exception, primary)
+                self.assertIs(caught.exception.__cause__, cleanup)
+                self.assertEqual(runtime.result.reason,
+                                 "model_error" if isinstance(primary, LLMError) else "execution_error")
+                self.assertIsNotNone(runtime.result.cleanup_error)
+                self.assertNotIn("private", runtime.result.model_dump_json())
+                self.assertEqual([e.type for e in events], ["agent_failed"])
+
+    async def test_non_exception_failure_survives_stream_close_error(self):
+        cleanup = RuntimeError("private-cleanup")
+
+        class BrokenStream:
+            def __init__(self):
+                self.sent = False
+
+            async def __anext__(self):
+                if self.sent:
+                    raise StopAsyncIteration
+                self.sent = True
+                return AgentFailed(reason="step_limit")
+
+            async def aclose(self):
+                raise cleanup
+
+        class BrokenLoop:
+            def stream(self, messages, options, *, max_steps):
+                return BrokenStream()
+
+        runtime = AgentRuntime(BrokenLoop())
+        with self.assertRaises(RuntimeError) as caught:
+            await runtime.run(self.messages)
+        self.assertIs(caught.exception, cleanup)
+        self.assertEqual(runtime.result.reason, "step_limit")
+        self.assertIsNotNone(runtime.result.cleanup_error)
+        self.assertEqual(runtime.result.messages, ())
+
+    async def test_success_candidate_with_close_error_is_failed(self):
+        cleanup = RuntimeError("private-cleanup")
+
+        class BrokenStream:
+            def __init__(self):
+                self.sent = False
+
+            async def __anext__(self):
+                if self.sent:
+                    raise StopAsyncIteration
+                self.sent = True
+                return AgentCompleted(messages=(Message(role="assistant", content="Done"),))
+
+            async def aclose(self):
+                raise cleanup
+
+        class BrokenLoop:
+            def stream(self, messages, options, *, max_steps):
+                return BrokenStream()
+
+        runtime = AgentRuntime(BrokenLoop())
+        events = []
+        with self.assertRaises(RuntimeError) as caught:
+            async with runtime.stream(self.messages) as run:
+                async for event in run.events():
+                    events.append(event)
+        self.assertIs(caught.exception, cleanup)
+        self.assertEqual(runtime.result.status, "failed")
+        self.assertIsNotNone(runtime.result.cleanup_error)
+        self.assertEqual(runtime.result.messages, ())
+        self.assertEqual([e.type for e in events], ["agent_failed"])
+
+    async def test_active_cancellation_survives_stream_close_error(self):
+        entered = asyncio.Event()
+        cleanup = RuntimeError("private-cleanup")
+
+        class BrokenStream:
+            async def __anext__(self):
+                entered.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                raise cleanup
+
+        class BrokenLoop:
+            def stream(self, messages, options, *, max_steps):
+                return BrokenStream()
+
+        runtime = AgentRuntime(BrokenLoop())
+        propagated = []
+
+        async def consume():
+            try:
+                await runtime.run(self.messages)
+            except asyncio.CancelledError as exc:
+                propagated.append(exc)
+                raise
+
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(entered.wait(), 2)
+        runtime.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertIs(propagated[0].__cause__, cleanup)
+        self.assertEqual(runtime.result.status, "cancelled")
+        self.assertIsNotNone(runtime.result.cleanup_error)
+
+    async def test_scope_body_error_survives_close_error(self):
+        primary = ValueError("private-display")
+        cleanup = RuntimeError("private-cleanup")
+
+        class BrokenStream:
+            async def __anext__(self):
+                return AgentStarted()
+
+            async def aclose(self):
+                raise cleanup
+
+        class BrokenLoop:
+            def stream(self, messages, options, *, max_steps):
+                return BrokenStream()
+
+        runtime = AgentRuntime(BrokenLoop())
+        with self.assertRaises(ValueError) as caught:
+            async with runtime.stream(self.messages) as run:
+                async for event in run.events():
+                    raise primary
+        self.assertIs(caught.exception, primary)
+        self.assertIs(caught.exception.__cause__, cleanup)
+        self.assertEqual(runtime.result.status, "cancelled")
+        self.assertIsNotNone(runtime.result.cleanup_error)
+
+    async def test_early_exit_reports_cleanup_error_instead_of_silently_cancelling(self):
+        cleanup = RuntimeError("private-cleanup")
+
+        class BrokenStream:
+            async def __anext__(self):
+                return AgentStarted()
+
+            async def aclose(self):
+                raise cleanup
+
+        class BrokenLoop:
+            def stream(self, messages, options, *, max_steps):
+                return BrokenStream()
+
+        runtime = AgentRuntime(BrokenLoop())
+        with self.assertRaises(asyncio.CancelledError) as caught:
+            async with runtime.stream(self.messages) as run:
+                async for event in run.events():
+                    break
+        self.assertIs(caught.exception.__cause__, cleanup)
+        self.assertEqual(runtime.result.status, "cancelled")
+        self.assertIsNotNone(runtime.result.cleanup_error)
 
 if __name__ == "__main__":
     unittest.main()

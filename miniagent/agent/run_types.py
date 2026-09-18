@@ -15,6 +15,7 @@ class RunResult(ContractModel):
     messages: tuple[Message, ...] = Field(default=(), repr=False)
     error_code: NonEmptyText | None = None
     error_message: NonEmptyText | None = Field(default=None, repr=False)
+    cleanup_error: NonEmptyText | None = Field(default=None, repr=False)
 
     @field_validator("messages", mode="before")
     @classmethod
@@ -26,7 +27,7 @@ class RunResult(ContractModel):
         if (self.error_code is None) != (self.error_message is None):
             raise ValueError("Error code and message must be supplied together.")
         if self.status == "succeeded":
-            if self.reason != "stop" or self.error_code is not None:
+            if self.reason != "stop" or self.error_code is not None or self.cleanup_error is not None:
                 raise ValueError("Success requires stop and no error.")
             LLMRequest(messages=self.messages)
             if self.messages[-1].role != "assistant" or self.messages[-1].tool_calls:
