@@ -15,7 +15,8 @@ runtime = AgentRuntime(AgentLoop(model, executor))
 async with runtime.stream(messages, options, max_steps=12) as run:
     async for event in run.events():
         show(event)
-        # 需要提前停止时 break，然后退出 async with。
+        # 完整消费事件，包括终态后的正常结束或异常传播。
+        # 需要主动取消时调用 run.cancel()，继续消费取消终态。
 
 result = runtime.result
 ```
@@ -26,7 +27,7 @@ result = runtime.result
 - 退出作用域时，未完成的 Run 被取消并等待清理；已完成 Run 保留原终态。
 - 单独 break 不能替代退出作用域：活动工具仍可能继续当前操作，作用域才是可靠收尾边界。
 - runtime.cancel() 是同步取消请求，可由同一事件循环中的控制任务调用。它不代表清理完成；等待 run 协程或退出 stream 作用域才能确认收尾。
-- 启动前 cancel() 直接将 pending 变为 cancelled，不创建执行任务；之后尝试启动同一实例仍按单次启动规则拒绝。
+- 启动前 cancel() 直接保存 cancelled 结果，不创建执行任务或事件流；之后尝试启动同一实例仍按单次启动规则拒绝。
 - 重复 cancel() 不重复向执行任务注入取消；结束后 cancel() 不覆盖结果。
 - cancel() 不提供跨线程同步保证。
 
@@ -40,7 +41,7 @@ Runtime 在继续推进 Loop 前、收到事件后检查取消标记，即使模
 
 终态事件在 Loop 收尾后交付，并由最终 RunResult 生成。模型异常时交付一次 AgentFailed，随后继续消费会抛出原始异常；即使调用方在失败事件处 break，作用域退出也会传播执行异常。清理失败不会先向 UI 发出成功事件再改成失败。
 
-消费者离开后，未消费的中间事件可能被取消终态替代；这里是实时事件流，不是可回放的审计日志。状态与结果保存不依赖消费者收到终态事件。
+调用方完整消费 AgentEvent，以开始、进度和终态事件判断运行过程，不轮询公开状态属性。消费者异常离开后，未消费的中间事件可能被取消终态替代；退出作用域仍会清理并保存最终结果，但这不能替代一次完整的事件消费。这里是实时事件流，不是可回放的审计日志。
 
 ## 取消与资源所有权
 

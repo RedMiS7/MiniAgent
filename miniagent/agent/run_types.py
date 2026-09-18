@@ -1,4 +1,4 @@
-"""Single-run state names and validated terminal results."""
+"""Validated terminal results for a single Run."""
 from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -6,8 +6,6 @@ from pydantic import Field, field_validator, model_validator
 from miniagent._validation import ContractModel
 from miniagent.models import LLMRequest, Message
 from miniagent.models.types import NonEmptyText
-
-RunState = Literal["pending", "running", "succeeded", "failed", "cancelled"]
 
 
 class RunResult(ContractModel):

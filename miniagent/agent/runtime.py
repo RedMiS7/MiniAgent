@@ -6,7 +6,7 @@ from typing import AsyncIterator, Sequence
 from miniagent.models import GenerationOptions, LLMError, Message
 from .events import AgentCancelled, AgentCompleted, AgentFailed
 from .loop import AgentLoop, LoopEvent
-from .run_types import RunResult, RunState
+from .run_types import RunResult
 
 
 class AgentRuntime:
@@ -26,12 +26,6 @@ class AgentRuntime:
         self._ready = asyncio.Event()
         self._event: LoopEvent | None = None
         self._error: BaseException | None = None
-
-    @property
-    def state(self) -> RunState:
-        if self._result is not None:
-            return self._result.status
-        return "running" if self._started else "pending"
 
     @property
     def result(self) -> RunResult | None:

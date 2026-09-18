@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import miniagent.agent as agent
 from miniagent.agent import AgentCompleted, AgentLoop, AgentRuntime, AgentStarted
 from miniagent.models import (
     ContinuationState, GenerationOptions, LLMError, LLMResponse, Message,
@@ -54,11 +55,10 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         continuation = ContinuationState(provider="fake", model="fake", payload='{"state":1}')
         model = FakeModel(response(continuation=continuation))
         runtime = self.runtime(model)
-        self.assertEqual(runtime.state, "pending")
         self.assertIsNone(runtime.result)
         options = GenerationOptions(max_output_tokens=100)
         result = await runtime.run(self.messages, options)
-        self.assertEqual(runtime.state, "succeeded")
+        self.assertEqual(runtime.result.status, "succeeded")
         self.assertIs(runtime.result, result)
         self.assertEqual(result.messages[:-1], tuple(self.messages))
         self.assertIs(result.messages[-1].continuation, continuation)
@@ -67,8 +67,6 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.closed_streams, 1)
         self.assertFalse(model.closed)
         with self.assertRaises(AttributeError):
-            runtime.state = "pending"
-        with self.assertRaises(AttributeError):
             runtime.result = None
 
     async def test_non_exception_failures_return_results(self):
@@ -76,7 +74,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(reason=reason):
                 runtime = self.runtime(FakeModel(response(reason=reason)))
                 result = await runtime.run(self.messages)
-                self.assertEqual(runtime.state, "failed")
+                self.assertEqual(runtime.result.status, "failed")
                 self.assertEqual(result.reason, reason)
                 self.assertEqual(result.messages, ())
                 self.assertIsNone(result.error_code)
@@ -109,7 +107,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(LLMError) as caught:
             await runtime.run(self.messages)
         self.assertIs(caught.exception, error)
-        self.assertEqual(runtime.state, "failed")
+        self.assertEqual(runtime.result.status, "failed")
         self.assertEqual(runtime.result.reason, "model_error")
         self.assertEqual(runtime.result.error_code, "connection")
         self.assertNotIn("private-diagnostic", runtime.result.model_dump_json())
@@ -156,14 +154,13 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(runtime.run(self.messages))
         try:
             await asyncio.wait_for(entered.wait(), 2)
-            self.assertEqual(runtime.state, "running")
             self.assertIsNone(runtime.result)
             with self.assertRaises(RuntimeError):
                 await runtime.run(self.messages)
         finally:
             release.set()
             await task
-        self.assertEqual(runtime.state, "succeeded")
+        self.assertEqual(runtime.result.status, "succeeded")
         self.assertEqual(len(model.requests), 1)
 
     async def test_terminal_result_waits_for_loop_cleanup(self):
@@ -181,12 +178,11 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(runtime.run(self.messages))
         try:
             await asyncio.wait_for(cleaning.wait(), 2)
-            self.assertEqual(runtime.state, "running")
             self.assertIsNone(runtime.result)
         finally:
             release.set()
             await task
-        self.assertEqual(runtime.state, "succeeded")
+        self.assertEqual(runtime.result.status, "succeeded")
 
     async def test_cleanup_failure_does_not_publish_success(self):
         error = RuntimeError("private-cleanup-error")
@@ -202,7 +198,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError) as caught:
             await runtime.run(self.messages)
         self.assertIs(caught.exception, error)
-        self.assertEqual(runtime.state, "failed")
+        self.assertEqual(runtime.result.status, "failed")
         self.assertEqual(runtime.result.reason, "execution_error")
         self.assertEqual(runtime.result.messages, ())
 
@@ -228,13 +224,12 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(entered.wait(), 2)
             task.cancel()
             await asyncio.wait_for(cleaning.wait(), 2)
-            self.assertEqual(runtime.state, "running")
             self.assertIsNone(runtime.result)
         finally:
             release.set()
             with self.assertRaises(asyncio.CancelledError):
                 await task
-        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(runtime.result.status, "cancelled")
         self.assertEqual(runtime.result.reason, "cancelled")
         self.assertEqual(model.closed_streams, 1)
         self.assertFalse(model.closed)
@@ -251,8 +246,8 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await first.run(self.messages)
         second_messages = [Message(role="user", content="Independent task")]
         result = await second.run(second_messages)
-        self.assertEqual(first.state, "failed")
-        self.assertEqual(second.state, "succeeded")
+        self.assertEqual(first.result.status, "failed")
+        self.assertEqual(second.result.status, "succeeded")
         self.assertEqual(model.requests[-1].messages, tuple(second_messages))
         self.assertEqual(result.messages[0], second_messages[0])
         self.assertFalse(model.closed)
@@ -278,7 +273,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 runtime = AgentRuntime(loop)
                 with self.assertRaises(RuntimeError):
                     await runtime.run(self.messages)
-                self.assertEqual(runtime.state, "failed")
+                self.assertEqual(runtime.result.status, "failed")
                 self.assertTrue(loop.closed)
 
     async def test_invalid_limit_is_recorded_without_model_call(self):
@@ -286,7 +281,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime = self.runtime(model)
         with self.assertRaises(ValueError):
             await runtime.run(self.messages, max_steps=0)
-        self.assertEqual(runtime.state, "failed")
+        self.assertEqual(runtime.result.status, "failed")
         self.assertEqual(runtime.result.reason, "execution_error")
         self.assertEqual(model.requests, [])
 
@@ -298,7 +293,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         async with runtime.stream(self.messages) as run:
             self.assertIs(run, runtime)
             events = [event async for event in run.events()]
-            self.assertEqual(run.state, "succeeded")
+            self.assertEqual(run.result.status, "succeeded")
         self.assertEqual([event.type for event in events], [
             "agent_started", "agent_progress", "llm_response_completed", "agent_completed",
         ])
@@ -315,7 +310,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime.cancel()
         saved = runtime.result
         runtime.cancel()
-        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(runtime.result.status, "cancelled")
         with self.assertRaises(RuntimeError):
             await runtime.run(self.messages)
         self.assertIs(runtime.result, saved)
@@ -326,7 +321,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime = self.runtime(model)
         async with runtime.stream(self.messages):
             pass
-        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(runtime.result.status, "cancelled")
         self.assertEqual(model.requests, [])
 
     async def test_break_at_call_boundaries_starts_no_next_call(self):
@@ -341,7 +336,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     async for event in run.events():
                         if event.type == boundary or getattr(event, "phase", None) == boundary:
                             break
-                self.assertEqual(runtime.state, "cancelled")
+                self.assertEqual(runtime.result.status, "cancelled")
                 self.assertEqual(observed, [])
                 self.assertEqual(len(model.requests), 0 if boundary in ("agent_started", "model") else 1)
                 self.assertEqual(model.closed_streams, len(model.requests))
@@ -357,7 +352,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     if event.type == "agent_started":
                         run.cancel()
                         run.cancel()
-        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(runtime.result.status, "cancelled")
         self.assertEqual([event.type for event in events], ["agent_started", "agent_cancelled"])
         self.assertEqual(model.requests, [])
 
@@ -391,13 +386,13 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             self.assertFalse(task.done())
             self.assertFalse(cleaned.is_set())
-            self.assertEqual(runtime.state, "running")
+            self.assertIsNone(runtime.result)
         finally:
             release.set()
             with self.assertRaises(asyncio.CancelledError):
                 await task
         self.assertTrue(cleaned.is_set())
-        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(runtime.result.status, "cancelled")
         self.assertEqual(model.closed_streams, 1)
         self.assertEqual(len(model.requests), 1)
 
@@ -429,7 +424,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cleaned.is_set())
         self.assertEqual(executions, ["wait"])
         self.assertEqual(len(model.requests), 1)
-        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(runtime.result.status, "cancelled")
 
     async def test_explicit_cancel_during_tool_does_not_start_next_call(self):
         entered, cleaned = asyncio.Event(), asyncio.Event()
@@ -459,16 +454,16 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cleaned.is_set())
         self.assertEqual(executions, ["wait"])
         self.assertEqual(len(model.requests), 1)
-        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(runtime.result.status, "cancelled")
 
     async def test_break_on_completion_preserves_success(self):
         runtime = self.runtime(FakeModel(response()))
         async with runtime.stream(self.messages) as run:
             async for event in run.events():
                 if event.type == "agent_completed":
-                    self.assertEqual(run.state, "succeeded")
+                    self.assertEqual(run.result.status, "succeeded")
                     break
-        self.assertEqual(runtime.state, "succeeded")
+        self.assertEqual(runtime.result.status, "succeeded")
 
     async def test_scope_body_error_cleans_run_and_preserves_body_exception(self):
         model = FakeModel(response())
@@ -480,7 +475,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     if event.type == "llm_response_completed":
                         raise error
         self.assertIs(caught.exception, error)
-        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(runtime.result.status, "cancelled")
         self.assertEqual(model.closed_streams, 1)
 
     async def test_events_require_scope_and_single_consumer(self):
@@ -507,7 +502,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(caught.exception, error)
         self.assertEqual([event.type for event in events].count("agent_failed"), 1)
         self.assertEqual(events[-1].reason, "model_error")
-        self.assertEqual(runtime.state, "failed")
+        self.assertEqual(runtime.result.status, "failed")
 
     async def test_break_on_failed_event_does_not_hide_exception(self):
         error = LLMError("connection", "Failed")
@@ -518,7 +513,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     if event.type == "agent_failed":
                         break
         self.assertIs(caught.exception, error)
-        self.assertEqual(runtime.state, "failed")
+        self.assertEqual(runtime.result.status, "failed")
 
 
     async def test_cancel_during_terminal_cleanup_waits_until_cleanup_finishes(self):
@@ -540,13 +535,13 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             runtime.cancel()
             await asyncio.sleep(0)
             self.assertFalse(task.done())
-            self.assertEqual(runtime.state, "running")
+            self.assertIsNone(runtime.result)
         finally:
             release.set()
             with self.assertRaises(asyncio.CancelledError):
                 await task
         self.assertTrue(cleaned.is_set())
-        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(runtime.result.status, "cancelled")
 
     async def test_model_suppressing_cancel_cannot_start_tools(self):
         entered = asyncio.Event()
@@ -577,13 +572,13 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed, [])
         self.assertEqual(len(model.requests), 1)
         self.assertEqual(model.closed_streams, 1)
-        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(runtime.result.status, "cancelled")
 
     async def test_invalid_messages_still_save_failure(self):
         runtime = self.runtime(FakeModel(response()))
         with self.assertRaises(TypeError):
             await runtime.run(None)
-        self.assertEqual(runtime.state, "failed")
+        self.assertEqual(runtime.result.status, "failed")
         self.assertEqual(runtime.result.reason, "execution_error")
 
 
@@ -605,7 +600,7 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(event.text, "partial")
                     self.assertIsNone(run.result)
                     break
-        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(runtime.result.status, "cancelled")
         self.assertEqual(model.closed_streams, 1)
 
     async def test_exit_after_tool_completion_preserves_side_effect_without_next_call(self):
@@ -628,7 +623,51 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     break
         self.assertEqual(executions, ["count"])
         self.assertEqual(len(model.requests), 1)
-        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(runtime.result.status, "cancelled")
+
+    def test_no_parallel_state_api(self):
+        runtime = self.runtime(FakeModel(response()))
+        self.assertNotIn("RunState", agent.__all__)
+        self.assertFalse(hasattr(agent, "RunState"))
+        self.assertFalse(hasattr(runtime, "state"))
+
+    async def test_complete_agent_events_report_run_outcome(self):
+        call = ToolCall(id="c", name="unregistered", arguments="{}")
+        error = LLMError("connection", "Failed")
+        cases = [
+            ((response(),), {}, False, "agent_completed", "stop", None),
+            ((response(reason="length"),), {}, False, "agent_failed", "length", None),
+            ((response(calls=(call,)),), {"max_steps": 1}, False, "agent_failed", "step_limit", None),
+            ((response(calls=(call,)), response()), {}, False, "agent_completed", "stop", None),
+            ((error,), {}, False, "agent_failed", "model_error", error),
+            ((response(),), {}, True, "agent_cancelled", "cancelled", None),
+        ]
+        for responses, options, cancel, terminal_type, reason, expected_error in cases:
+            with self.subTest(terminal_type=terminal_type, reason=reason, responses=responses):
+                runtime = self.runtime(FakeModel(*responses))
+                events = []
+                caught = None
+                try:
+                    async with runtime.stream(self.messages, **options) as run:
+                        async for event in run.events():
+                            if event.type.startswith("agent_"):
+                                events.append(event)
+                            if cancel and event.type == "agent_started":
+                                run.cancel()
+                except (LLMError, asyncio.CancelledError) as exc:
+                    caught = exc
+                self.assertEqual(events[0].type, "agent_started")
+                self.assertEqual(events[-1].type, terminal_type)
+                self.assertEqual(events[-1].reason, reason)
+                terminals = [event for event in events if event.type in (
+                    "agent_completed", "agent_failed", "agent_cancelled",
+                )]
+                self.assertEqual(len(terminals), 1)
+                if cancel:
+                    self.assertIsInstance(caught, asyncio.CancelledError)
+                else:
+                    self.assertIs(caught, expected_error)
+
 
 if __name__ == "__main__":
     unittest.main()

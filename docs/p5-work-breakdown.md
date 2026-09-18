@@ -29,7 +29,7 @@ P5 开始实现前需核对当前数据交接契约，尤其是成功历史、�
 
 目的：先确定一次运行如何被调用方观察，避免后续取消、清理和回调各自解释“完成”。
 
-- 在 miniagent/agent/ 下定义最小运行状态和转换约定，建议 pending → running → succeeded / failed / cancelled；启动前取消允许 pending → cancelled。
+- 复用 AgentEvent 表达启动、进度与终态，调用方完整消费事件；不另定义公开运行状态类型或查询属性。
 - 区分状态和结束原因：step_limit 属于 failed，取消属于 cancelled，工具单次失败回传模型不自动等于 Run 失败。
 - 复用 Message、AgentCompleted.messages 和现有事件；仅在统一入口确有需要时新增最小结果类型，不重复维护历史。
 - 明确模型异常继续传播、非异常失败正常结束、取消继续传播取消异常；终态不被后续事件覆盖。

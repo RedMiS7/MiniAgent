@@ -1,22 +1,17 @@
 import unittest
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
-from miniagent.agent import AgentCompleted, RunResult, RunState
+from miniagent.agent import AgentCompleted, RunResult
 from miniagent.models import ContinuationState, Message, ToolCall
 from miniagent.tools import ToolResult
 
 
 class RunTypesTests(unittest.TestCase):
-    def test_run_states_and_terminal_statuses(self):
-        adapter = TypeAdapter(RunState)
-        for state in ("pending", "running", "succeeded", "failed", "cancelled"):
-            self.assertEqual(adapter.validate_python(state), state)
-        for state in ("pending", "running", "unknown"):
-            with self.subTest(state=state), self.assertRaises(ValidationError):
-                RunResult(status=state, reason="stop")
-        with self.assertRaises(ValidationError):
-            adapter.validate_python("unknown")
+    def test_result_rejects_nonterminal_statuses(self):
+        for status in ("pending", "running", "unknown"):
+            with self.subTest(status=status), self.assertRaises(ValidationError):
+                RunResult(status=status, reason="stop")
 
     def test_success_preserves_tool_failure_history_and_continuation(self):
         state = ContinuationState(provider="fake", model="fake", payload='{"state":1}')

@@ -1,4 +1,4 @@
-# P5：Run 状态与结果契约
+# P5：Run 结果契约
 
 ## 问题与范围
 
@@ -8,9 +8,9 @@
 
 ## 契约与使用
 
-从 miniagent.agent 导入 RunState 和 RunResult。RunState 包含 pending、running、succeeded、failed、cancelled；RunResult 只接受后三种终态。
+从 miniagent.agent 导入 RunResult，其 status 只接受 succeeded、failed、cancelled 三种最终结果类别。运行过程通过完整消费 AgentEvent 判断，不另定义公开运行状态类型。
 
-后续 Runtime 应落实 pending → running → succeeded / failed / cancelled，以及启动前 pending → cancelled；终态不可再次转换。本次只验证数据结构，不执行或验证这些状态转换。
+RunResult 仅交付收尾后的结果，不表达待启动或运行中阶段。本次只验证结果数据结构；启动、进度与结束由既有 AgentEvent 表达。
 
 ```python
 from miniagent.agent import RunResult
@@ -37,7 +37,7 @@ RunResult 使用现有严格、冻结的 ContractModel；字段赋值修改、�
 
 ## 为什么这样设计
 
-- 状态表达结果类别，reason 表达结束原因。例如 step_limit 是 failed，不是新的状态。
+- status 只表达最终结果类别，reason 表达结束原因。例如 step_limit 对应 failed；运行过程不新增一套状态定义。
 - 成功结果必须包含非空、工具调用与结果配对完整的历史，并以不带工具调用的 assistant 消息结束。复用 LLMRequest 的历史校验，避免复制工具配对规则。
 - 保留 Message 中不透明的模型续接状态，不解析提供商数据。工具错误结果可以出现在成功历史中，因为单工具失败不等于 Run 失败。
 - 失败与取消不暴露可续接历史，避免把包含未完成工具调用的数据传给下一轮。部分历史诊断和恢复点不在本次范围。
