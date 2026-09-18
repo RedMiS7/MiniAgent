@@ -89,18 +89,19 @@ P4 已实现 AgentLoop 与 agent_cli.py，按用户要求提前提供 CLI 单任
 ## P5：Agent Runtime
 
 - [ ] 实现 Runtime，管理 Run 状态、步数限制、取消和资源清理。
-- [ ] 实现 Runtime 层的审批等待、中断、重试和错误恢复控制；具体策略由上层提供。
+- [ ] 提供统一 Run 结果、结束原因和异常信息，执行上层取消指令，为 Harness 提供运行事实。
 
 **验收标准**
 
 - 独立 Run 的状态、结果和结束原因准确，成功历史可交付，失败或取消不会被当作成功。
 - 达到步数上限、取消或中断后不再启动新调用，Run 自有资源能够清理，外部资源不会被误关。
-- 模拟测试覆盖批准、拒绝、中断以及可重试和不可重试失败；未批准的调用不可执行，已完成的副作用不会被 Runtime 自动重放。
+- 模拟测试覆盖成功、失败、异常和取消；终态只确定一次，清理完成后可查询准确结果。
 
 ## P6：Agent Harness
 
-- [ ] 组装 Harness，注入 Model、Tools 和 Agent Loop，提供统一运行入口。
+- [ ] 组装 Harness，注入 Model、Tools、Agent Loop 和 Runtime，提供统一运行入口。
 - [ ] 在 Harness 中配置工具授权并汇集 Events。
+- [ ] 实现审批、中断处理、重试和错误恢复策略，依据 Runtime 的运行事实作出决策，并通过运行控制接口落实。
 - [ ] 用不同任务验证 Harness 复用，编写使用示例。
 
 **验收标准**
@@ -108,6 +109,7 @@ P4 已实现 AgentLoop 与 agent_cli.py，按用户要求提前提供 CLI 单任
 - 同一 Harness 可运行文件摘要和 echo 文本处理任务，仅调整指令和 Tools，独立 Run 不串用状态。
 - Harness 创建的共享资源按所有权关闭，外部注入资源不会被误关。
 - 未授权 Tools 不可执行，Events 能关联到对应 Run，事件回调失败不会导致重复执行。
+- 模拟测试覆盖审批批准与拒绝、中断后的取消或恢复，以及可重试与不可重试失败；未批准的调用不可执行，重试与恢复不会自动重放已完成的副作用。
 - 至少两种现有 Model Adapters 通过模拟工具往返测试；替换 Model 或注册新 Tool 无需修改 Agent Loop 和 Runtime。
 
 ## P7：Session 与 Streaming
@@ -130,7 +132,7 @@ CLI 多轮子任务已完成：agent_cli.py 在单进程内保留成功历史及
 - [ ] Context Compaction 与 Memory：上下文压缩与长期记忆。
 - [ ] Retrieval 与 MCP Tools：检索和外部服务接入。
 - [ ] Planning 与 Evaluation：任务规划和结果检查。
-- [ ] Human-in-the-loop：执行中的逐次操作授权。
+- [ ] Human-in-the-loop 扩展：在 P6 工具审批基础上，按需支持人工修改计划或执行结果。
 
 **验收标准**
 

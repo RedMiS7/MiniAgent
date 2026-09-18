@@ -7,9 +7,9 @@
 
 ## 阶段边界
 
-P5 只实现 Agent Runtime，负责 Run 状态、结果、执行限制、取消、资源清理，以及审批等待、中断、重试和错误恢复所需的运行控制与事实状态。具体审批和重试策略由上层提供，Runtime 不自行判断工具风险，也不自动重放已完成的副作用。
+P5 只实现 Agent Runtime，负责 Run 状态、结果、执行限制、取消和资源清理，执行上层取消指令并提供权威运行事实。审批、中断处理、重试和错误恢复策略归入 P6。
 
-P6 实现 Agent Harness，负责注入 Model、Tools、Agent Loop 和 Runtime，配置工具授权，汇集关联到 Run 的 Events，并管理 Harness 持有的共享资源。
+P6 实现 Agent Harness，负责注入 Model、Tools、Agent Loop 和 Runtime，配置工具授权，汇集关联到 Run 的 Events，并管理 Harness 持有的共享资源。Harness 依据运行事实协调审批、中断处理、重试和错误恢复策略；Runtime 落实取消与清理，已完成的副作用不会被自动重放。
 
 原 P6 Session 与 Streaming 顺延为 P7，原 P7 按需探索顺延为 P8。最小学习版的交付点相应从原 P5 调整为 P6，即 Runtime 和 Harness 均完成后交付。
 
