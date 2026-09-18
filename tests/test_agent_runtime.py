@@ -7,9 +7,9 @@ import unittest
 from miniagent.agent import AgentCompleted, AgentLoop, AgentRuntime, AgentStarted
 from miniagent.models import (
     ContinuationState, GenerationOptions, LLMError, LLMResponse, Message,
-    ResponseCompleted, ToolCall,
+    ResponseCompleted, TextDelta, ToolCall, ToolDefinition,
 )
-from miniagent.tools import ToolContext, ToolExecutor, ToolRegistry
+from miniagent.tools import ToolContext, ToolExecutor, ToolRegistry, ToolResult
 
 
 def response(text="Done", *, calls=(), reason=None, continuation=None):
@@ -290,6 +290,345 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.result.reason, "execution_error")
         self.assertEqual(model.requests, [])
 
+
+
+    async def test_stream_preserves_order_and_publishes_one_terminal(self):
+        model = FakeModel(response())
+        runtime = self.runtime(model)
+        async with runtime.stream(self.messages) as run:
+            self.assertIs(run, runtime)
+            events = [event async for event in run.events()]
+            self.assertEqual(run.state, "succeeded")
+        self.assertEqual([event.type for event in events], [
+            "agent_started", "agent_progress", "llm_response_completed", "agent_completed",
+        ])
+        saved = runtime.result
+        runtime.cancel()
+        runtime.cancel()
+        self.assertIs(runtime.result, saved)
+        self.assertEqual(model.closed_streams, 1)
+        self.assertFalse(model.closed)
+
+    async def test_cancel_before_start_never_calls_model(self):
+        model = FakeModel(response())
+        runtime = self.runtime(model)
+        runtime.cancel()
+        saved = runtime.result
+        runtime.cancel()
+        self.assertEqual(runtime.state, "cancelled")
+        with self.assertRaises(RuntimeError):
+            await runtime.run(self.messages)
+        self.assertIs(runtime.result, saved)
+        self.assertEqual(model.requests, [])
+
+    async def test_scope_without_consumption_cancels_without_calls(self):
+        model = FakeModel(response())
+        runtime = self.runtime(model)
+        async with runtime.stream(self.messages):
+            pass
+        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(model.requests, [])
+
+    async def test_break_at_call_boundaries_starts_no_next_call(self):
+        call = ToolCall(id="c", name="unregistered", arguments="{}")
+        for boundary in ("agent_started", "model", "llm_response_completed", "tools"):
+            with self.subTest(boundary=boundary):
+                observed = []
+                self.executor.on_event = observed.append
+                model = FakeModel(response(calls=(call,)))
+                runtime = self.runtime(model)
+                async with runtime.stream(self.messages) as run:
+                    async for event in run.events():
+                        if event.type == boundary or getattr(event, "phase", None) == boundary:
+                            break
+                self.assertEqual(runtime.state, "cancelled")
+                self.assertEqual(observed, [])
+                self.assertEqual(len(model.requests), 0 if boundary in ("agent_started", "model") else 1)
+                self.assertEqual(model.closed_streams, len(model.requests))
+
+    async def test_explicit_cancel_between_events_has_one_cancelled_terminal(self):
+        model = FakeModel(response())
+        runtime = self.runtime(model)
+        events = []
+        with self.assertRaises(asyncio.CancelledError):
+            async with runtime.stream(self.messages) as run:
+                async for event in run.events():
+                    events.append(event)
+                    if event.type == "agent_started":
+                        run.cancel()
+                        run.cancel()
+        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual([event.type for event in events], ["agent_started", "agent_cancelled"])
+        self.assertEqual(model.requests, [])
+
+    async def test_model_cancel_and_repeated_caller_cancel_do_not_interrupt_cleanup(self):
+        entered, cleaning, release, cleaned = (asyncio.Event() for _ in range(4))
+
+        class BlockingModel(FakeModel):
+            async def stream(self, request):
+                self.requests.append(request)
+                try:
+                    entered.set()
+                    await asyncio.Event().wait()
+                    yield ResponseCompleted(response=response())
+                finally:
+                    cleaning.set()
+                    await release.wait()
+                    cleaned.set()
+                    self.closed_streams += 1
+
+        model = BlockingModel()
+        runtime = self.runtime(model)
+        task = asyncio.create_task(runtime.run(self.messages))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            runtime.cancel()
+            await asyncio.wait_for(cleaning.wait(), 2)
+            runtime.cancel()
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            self.assertFalse(cleaned.is_set())
+            self.assertEqual(runtime.state, "running")
+        finally:
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertTrue(cleaned.is_set())
+        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(model.closed_streams, 1)
+        self.assertEqual(len(model.requests), 1)
+
+    async def test_exit_during_tool_cancels_and_waits_without_starting_second_tool(self):
+        entered, cleaned = asyncio.Event(), asyncio.Event()
+        executions = []
+
+        class BlockingTool:
+            definition = ToolDefinition(name="wait", description="Wait", parameters={"type": "object"})
+
+            async def execute(self, arguments, context):
+                executions.append("wait")
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cleaned.set()
+                return ToolResult(success=True)
+
+        self.executor.registry.register(BlockingTool())
+        calls = tuple(ToolCall(id=str(i), name="wait", arguments="{}") for i in range(2))
+        model = FakeModel(response(calls=calls), response())
+        runtime = self.runtime(model)
+        async with runtime.stream(self.messages) as run:
+            async for event in run.events():
+                if event.type == "tool_started":
+                    self.assertTrue(entered.is_set())
+                    break
+        self.assertTrue(cleaned.is_set())
+        self.assertEqual(executions, ["wait"])
+        self.assertEqual(len(model.requests), 1)
+        self.assertEqual(runtime.state, "cancelled")
+
+    async def test_explicit_cancel_during_tool_does_not_start_next_call(self):
+        entered, cleaned = asyncio.Event(), asyncio.Event()
+        executions = []
+
+        class BlockingTool:
+            definition = ToolDefinition(name="wait", description="Wait", parameters={"type": "object"})
+
+            async def execute(self, arguments, context):
+                executions.append("wait")
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cleaned.set()
+                return ToolResult(success=True)
+
+        self.executor.registry.register(BlockingTool())
+        calls = tuple(ToolCall(id=str(i), name="wait", arguments="{}") for i in range(2))
+        model = FakeModel(response(calls=calls), response())
+        runtime = self.runtime(model)
+        task = asyncio.create_task(runtime.run(self.messages))
+        await asyncio.wait_for(entered.wait(), 2)
+        runtime.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(cleaned.is_set())
+        self.assertEqual(executions, ["wait"])
+        self.assertEqual(len(model.requests), 1)
+        self.assertEqual(runtime.state, "cancelled")
+
+    async def test_break_on_completion_preserves_success(self):
+        runtime = self.runtime(FakeModel(response()))
+        async with runtime.stream(self.messages) as run:
+            async for event in run.events():
+                if event.type == "agent_completed":
+                    self.assertEqual(run.state, "succeeded")
+                    break
+        self.assertEqual(runtime.state, "succeeded")
+
+    async def test_scope_body_error_cleans_run_and_preserves_body_exception(self):
+        model = FakeModel(response())
+        runtime = self.runtime(model)
+        error = ValueError("Display failed")
+        with self.assertRaises(ValueError) as caught:
+            async with runtime.stream(self.messages) as run:
+                async for event in run.events():
+                    if event.type == "llm_response_completed":
+                        raise error
+        self.assertIs(caught.exception, error)
+        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(model.closed_streams, 1)
+
+    async def test_events_require_scope_and_single_consumer(self):
+        runtime = self.runtime(FakeModel(response()))
+        with self.assertRaises(RuntimeError):
+            await anext(runtime.events())
+        async with runtime.stream(self.messages) as run:
+            events = run.events()
+            await anext(events)
+            with self.assertRaises(RuntimeError):
+                await anext(run.events())
+        with self.assertRaises(RuntimeError):
+            await anext(events)
+        await events.aclose()
+
+    async def test_stream_failure_emits_failed_before_propagating_original(self):
+        error = LLMError("connection", "private-diagnostic")
+        runtime = self.runtime(FakeModel(error))
+        events = []
+        with self.assertRaises(LLMError) as caught:
+            async with runtime.stream(self.messages) as run:
+                async for event in run.events():
+                    events.append(event)
+        self.assertIs(caught.exception, error)
+        self.assertEqual([event.type for event in events].count("agent_failed"), 1)
+        self.assertEqual(events[-1].reason, "model_error")
+        self.assertEqual(runtime.state, "failed")
+
+    async def test_break_on_failed_event_does_not_hide_exception(self):
+        error = LLMError("connection", "Failed")
+        runtime = self.runtime(FakeModel(error))
+        with self.assertRaises(LLMError) as caught:
+            async with runtime.stream(self.messages) as run:
+                async for event in run.events():
+                    if event.type == "agent_failed":
+                        break
+        self.assertIs(caught.exception, error)
+        self.assertEqual(runtime.state, "failed")
+
+
+    async def test_cancel_during_terminal_cleanup_waits_until_cleanup_finishes(self):
+        cleaning, release, cleaned = (asyncio.Event() for _ in range(3))
+
+        class FinishingLoop:
+            async def stream(self, messages, options, *, max_steps):
+                try:
+                    yield AgentCompleted(messages=(*messages, Message(role="assistant", content="Done")))
+                finally:
+                    cleaning.set()
+                    await release.wait()
+                    cleaned.set()
+
+        runtime = AgentRuntime(FinishingLoop())
+        task = asyncio.create_task(runtime.run(self.messages))
+        try:
+            await asyncio.wait_for(cleaning.wait(), 2)
+            runtime.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            self.assertEqual(runtime.state, "running")
+        finally:
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertTrue(cleaned.is_set())
+        self.assertEqual(runtime.state, "cancelled")
+
+    async def test_model_suppressing_cancel_cannot_start_tools(self):
+        entered = asyncio.Event()
+        observed = []
+        self.executor.on_event = observed.append
+        call = ToolCall(id="c", name="unregistered", arguments="{}")
+
+        class SuppressingModel(FakeModel):
+            async def stream(self, request):
+                self.requests.append(request)
+                try:
+                    entered.set()
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        pass
+                    yield ResponseCompleted(response=response(calls=(call,)))
+                finally:
+                    self.closed_streams += 1
+
+        model = SuppressingModel()
+        runtime = self.runtime(model)
+        task = asyncio.create_task(runtime.run(self.messages))
+        await asyncio.wait_for(entered.wait(), 2)
+        runtime.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(observed, [])
+        self.assertEqual(len(model.requests), 1)
+        self.assertEqual(model.closed_streams, 1)
+        self.assertEqual(runtime.state, "cancelled")
+
+    async def test_invalid_messages_still_save_failure(self):
+        runtime = self.runtime(FakeModel(response()))
+        with self.assertRaises(TypeError):
+            await runtime.run(None)
+        self.assertEqual(runtime.state, "failed")
+        self.assertEqual(runtime.result.reason, "execution_error")
+
+
+    async def test_text_delta_is_delivered_before_model_completion(self):
+        class StreamingModel(FakeModel):
+            async def stream(self, request):
+                self.requests.append(request)
+                try:
+                    yield TextDelta(text="partial")
+                    await asyncio.Event().wait()
+                finally:
+                    self.closed_streams += 1
+
+        model = StreamingModel()
+        runtime = self.runtime(model)
+        async with runtime.stream(self.messages) as run:
+            async for event in run.events():
+                if event.type == "llm_text_delta":
+                    self.assertEqual(event.text, "partial")
+                    self.assertIsNone(run.result)
+                    break
+        self.assertEqual(runtime.state, "cancelled")
+        self.assertEqual(model.closed_streams, 1)
+
+    async def test_exit_after_tool_completion_preserves_side_effect_without_next_call(self):
+        executions = []
+
+        class CountingTool:
+            definition = ToolDefinition(name="count", description="Count", parameters={"type": "object"})
+
+            async def execute(self, arguments, context):
+                executions.append("count")
+                return ToolResult(success=True)
+
+        self.executor.registry.register(CountingTool())
+        calls = tuple(ToolCall(id=str(i), name="count", arguments="{}") for i in range(2))
+        model = FakeModel(response(calls=calls), response())
+        runtime = self.runtime(model)
+        async with runtime.stream(self.messages) as run:
+            async for event in run.events():
+                if event.type == "tool_completed":
+                    break
+        self.assertEqual(executions, ["count"])
+        self.assertEqual(len(model.requests), 1)
+        self.assertEqual(runtime.state, "cancelled")
 
 if __name__ == "__main__":
     unittest.main()
