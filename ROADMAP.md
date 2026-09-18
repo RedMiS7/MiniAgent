@@ -97,6 +97,8 @@ P4 已实现 AgentLoop 与 agent_cli.py，按用户要求提前提供 CLI 单任
 - 达到步数上限、取消或中断后不再启动新调用，Run 自有资源能够清理，外部资源不会被误关。
 - 模拟测试覆盖成功、失败、异常和取消；终态只确定一次，清理完成后可查询准确结果。
 
+P5 局部进展：已实现 Run 状态与结果契约，以及单次 AgentRuntime 的执行、终态保存和异常后结果查询；全部 124 项离线测试通过。主动取消、运行作用域与完整清理控制仍待完成，见 docs/p5-run-result-contract.md 和 docs/p5-runtime-lifecycle.md。
+
 ## P6：Agent Harness
 
 - [ ] 组装 Harness，注入 Model、Tools、Agent Loop 和 Runtime，提供统一运行入口。

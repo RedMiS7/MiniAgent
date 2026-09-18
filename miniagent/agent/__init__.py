@@ -6,10 +6,11 @@ from .events import (
 
 from .loop import AgentLoop, LoopEvent
 from .run_types import RunResult, RunState
+from .runtime import AgentRuntime
 
 __all__ = [
     "AgentLoop", "LoopEvent",
-    "RunResult", "RunState",
+    "AgentRuntime", "RunResult", "RunState",
     "AgentEvent", "AgentStarted", "AgentProgress", "AgentCompleted",
     "AgentFailed", "AgentCancelled",
 ]
