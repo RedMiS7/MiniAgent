@@ -1,6 +1,6 @@
 """A single run's streaming model/tool loop; dependencies are caller-owned."""
 import asyncio
-from contextlib import aclosing, suppress
+from contextlib import suppress
 from typing import Annotated, AsyncIterator, Sequence, Union
 
 from pydantic import Field
@@ -32,17 +32,31 @@ class AgentLoop:
         history = list(request.messages)
         seen = {call.id for message in history for call in message.tool_calls}
         yield AgentStarted()
+        closing = False
         try:
             for step in range(1, max_steps + 1):
                 yield AgentProgress(step=step, phase="model")
                 response = None
-                async with aclosing(self.model.stream(request)) as events:
+                events = self.model.stream(request)
+                primary_error = None
+                try:
                     async for event in events:
                         if response is not None:
                             raise LLMError("invalid_response", "Events followed the final response.")
                         if isinstance(event, ResponseCompleted):
                             response = event.response
                         yield event
+                except BaseException as exc:
+                    primary_error = exc
+                    closing = isinstance(exc, GeneratorExit)
+                    raise
+                finally:
+                    try:
+                        await events.aclose()
+                    except Exception as cleanup_error:
+                        if primary_error is not None and not closing and primary_error is not cleanup_error:
+                            raise primary_error from cleanup_error
+                        raise
                 if response is None:
                     raise LLMError("invalid_response", "Stream returned no final response.")
                 history.append(response.message)
@@ -66,6 +80,7 @@ class AgentLoop:
                     queue = asyncio.Queue()
                     task = asyncio.create_task(self.executor.execute(call, on_event=queue.put_nowait))
                     task.add_done_callback(lambda done, q=queue: q.put_nowait(None))
+                    primary_error = None
                     try:
                         while True:
                             event = await queue.get()
@@ -73,20 +88,33 @@ class AgentLoop:
                                 break
                             yield event
                         result = await task
+                    except BaseException as exc:
+                        primary_error = exc
+                        closing = isinstance(exc, GeneratorExit)
+                        raise
                     finally:
                         if not task.done():
                             task.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await task
+                        try:
+                            with suppress(asyncio.CancelledError):
+                                await task
+                        except Exception as cleanup_error:
+                            if (primary_error is not None and not closing
+                                    and primary_error is not cleanup_error):
+                                raise primary_error from cleanup_error
+                            raise
                     history.append(result.to_message(call.id))
                 yield AgentProgress(step=step, phase="completed")
                 request = LLMRequest(messages=history, tools=request.tools, options=request.options)
         except asyncio.CancelledError:
-            yield AgentCancelled()
+            if not closing:
+                yield AgentCancelled()
             raise
         except LLMError:
-            yield AgentFailed(reason="model_error")
+            if not closing:
+                yield AgentFailed(reason="model_error")
             raise
         except Exception:
-            yield AgentFailed(reason="execution_error")
+            if not closing:
+                yield AgentFailed(reason="execution_error")
             raise

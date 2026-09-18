@@ -10,7 +10,7 @@ from miniagent.models import (
     ContinuationState, GenerationOptions, LLMError, LLMResponse, Message,
     ResponseCompleted, TextDelta, ToolCall, ToolDefinition,
 )
-from miniagent.tools import ToolContext, ToolExecutor, ToolRegistry, ToolResult
+from miniagent.tools import ToolContext, ToolExecutor, ToolRegistry, ToolResult, ToolStarted
 
 
 def response(text="Done", *, calls=(), reason=None, continuation=None):
@@ -845,6 +845,191 @@ class AgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(caught.exception.__cause__, cleanup)
         self.assertEqual(runtime.result.status, "cancelled")
         self.assertIsNotNone(runtime.result.cleanup_error)
+
+
+    async def test_model_stream_close_preserves_original_failure(self):
+        for primary in (LLMError("connection", "private-primary"), RuntimeError("private-primary")):
+            with self.subTest(primary=type(primary).__name__):
+                cleanup = RuntimeError("private-cleanup")
+
+                class ModelStream:
+                    def __aiter__(self):
+                        return self
+                    async def __anext__(self):
+                        raise primary
+                    async def aclose(self):
+                        raise cleanup
+
+                class Model:
+                    def stream(self, request):
+                        return ModelStream()
+
+                runtime = self.runtime(Model())
+                events = []
+                with self.assertRaises(type(primary)) as caught:
+                    async with runtime.stream(self.messages) as run:
+                        async for event in run.events():
+                            events.append(event)
+                self.assertIs(caught.exception, primary)
+                self.assertIs(caught.exception.__cause__, cleanup)
+                self.assertEqual(runtime.result.reason,
+                                 "model_error" if isinstance(primary, LLMError) else "execution_error")
+                self.assertEqual(events[-1].type, "agent_failed")
+                self.assertEqual(sum(e.type == "agent_failed" for e in events), 1)
+                self.assertNotIn("private", runtime.result.model_dump_json())
+
+    async def test_model_cancel_retains_close_failure_chain(self):
+        entered = asyncio.Event()
+        cleanup = RuntimeError("private-cleanup")
+        propagated = []
+
+        class ModelStream:
+            def __aiter__(self):
+                return self
+            async def __anext__(self):
+                entered.set()
+                await asyncio.Event().wait()
+            async def aclose(self):
+                raise cleanup
+
+        class Model:
+            def stream(self, request):
+                return ModelStream()
+
+        runtime = self.runtime(Model())
+        events = []
+
+        async def consume():
+            try:
+                async with runtime.stream(self.messages) as run:
+                    async for event in run.events():
+                        events.append(event)
+            except asyncio.CancelledError as exc:
+                propagated.append(exc)
+                raise
+
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(entered.wait(), 2)
+        runtime.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertIs(propagated[0].__cause__, cleanup)
+        self.assertEqual(runtime.result.status, "cancelled")
+        self.assertEqual(events[-1].type, "agent_cancelled")
+
+    async def test_early_model_close_reports_actual_cleanup_error(self):
+        cleanup = RuntimeError("private-cleanup")
+
+        class ModelStream:
+            def __aiter__(self):
+                return self
+            async def __anext__(self):
+                return TextDelta(text="partial")
+            async def aclose(self):
+                raise cleanup
+
+        class Model:
+            def stream(self, request):
+                return ModelStream()
+
+        runtime = self.runtime(Model())
+        with self.assertRaises(asyncio.CancelledError) as caught:
+            async with runtime.stream(self.messages) as run:
+                async for event in run.events():
+                    if event.type == "llm_text_delta":
+                        break
+        self.assertIs(caught.exception.__cause__, cleanup)
+        self.assertEqual(runtime.result.status, "cancelled")
+        self.assertIsNotNone(runtime.result.cleanup_error)
+
+    async def test_model_close_failure_prevents_success(self):
+        cleanup = RuntimeError("private-cleanup")
+
+        class ModelStream:
+            def __init__(self):
+                self.sent = False
+            def __aiter__(self):
+                return self
+            async def __anext__(self):
+                if self.sent:
+                    raise StopAsyncIteration
+                self.sent = True
+                return ResponseCompleted(response=response())
+            async def aclose(self):
+                raise cleanup
+
+        class Model:
+            def stream(self, request):
+                return ModelStream()
+
+        runtime = self.runtime(Model())
+        with self.assertRaises(RuntimeError) as caught:
+            await runtime.run(self.messages)
+        self.assertIs(caught.exception, cleanup)
+        self.assertEqual(runtime.result.status, "failed")
+        self.assertEqual(runtime.result.messages, ())
+
+    async def test_tool_cleanup_failure_keeps_cancellation_and_stops_next_call(self):
+        entered = asyncio.Event()
+        cleanup = RuntimeError("private-tool-cleanup")
+        propagated = []
+        calls = []
+
+        class Executor:
+            registry = ToolRegistry()
+            async def execute(self, call, *, on_event):
+                calls.append(call.id)
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    raise cleanup
+
+        model = FakeModel(response(calls=(
+            ToolCall(id="one", name="wait", arguments="{}"),
+            ToolCall(id="two", name="wait", arguments="{}"),
+        )))
+        runtime = AgentRuntime(AgentLoop(model, Executor()))
+
+        async def consume():
+            try:
+                await runtime.run(self.messages)
+            except asyncio.CancelledError as exc:
+                propagated.append(exc)
+                raise
+
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(entered.wait(), 2)
+        runtime.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertIs(propagated[0].__cause__, cleanup)
+        self.assertEqual(runtime.result.status, "cancelled")
+        self.assertEqual(calls, ["one"])
+        self.assertEqual(len(model.requests), 1)
+
+    async def test_early_tool_close_reports_actual_cleanup_error(self):
+        cleanup = RuntimeError("private-tool-cleanup")
+
+        class Executor:
+            registry = ToolRegistry()
+            async def execute(self, call, *, on_event):
+                on_event(ToolStarted(call_id=call.id, tool_name=call.name))
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    raise cleanup
+
+        model = FakeModel(response(calls=(ToolCall(id="one", name="wait", arguments="{}"),)))
+        runtime = AgentRuntime(AgentLoop(model, Executor()))
+        with self.assertRaises(asyncio.CancelledError) as caught:
+            async with runtime.stream(self.messages) as run:
+                async for event in run.events():
+                    if event.type == "tool_started":
+                        break
+        self.assertIs(caught.exception.__cause__, cleanup)
+        self.assertEqual(runtime.result.status, "cancelled")
+
 
 if __name__ == "__main__":
     unittest.main()

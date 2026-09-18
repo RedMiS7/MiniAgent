@@ -136,7 +136,9 @@ class AgentRuntime:
                         event = await anext(events)
                     except StopAsyncIteration:
                         raise RuntimeError("Loop returned no terminal event.") from None
-                    self._check_cancelled()
+                    # Drain a cancellation terminal to preserve the Loop's original exception chain.
+                    if not isinstance(event, AgentCancelled):
+                        self._check_cancelled()
                     if isinstance(event, AgentCompleted):
                         terminal = RunResult(status="succeeded", reason=event.reason,
                                              messages=event.messages)
