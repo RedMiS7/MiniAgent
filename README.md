@@ -454,3 +454,41 @@ CLI 自动循环调用模型和工具，显示每一轮模型请求、工具名�
 
 实现和边界见 [P4 Agent Loop](docs/p4-agent-loop.md) 和 [CLI 多轮对话](docs/cli-multiturn-conversation.md)。离线验证：
 `python -m unittest discover -s tests -q`。
+
+
+## Runtime 真实 API 验证 CLI
+
+使用 `runtime_cli.py` 直接验证 P5 Runtime，每次运行一个独立任务。它完整消费
+`runtime.stream(...)` 的事件，展示流式文本、执行过程与最终结果，并在 Runtime 收尾后关闭 CLI 创建的模型。
+
+沿用已有环境变量：OpenAI 使用 `OPENAI_API_KEY`，DeepSeek 使用 `DEEPSEEK_API_KEY`，
+百炼使用 `DASHSCOPE_API_KEY`。以下模型名可替换为账号支持的模型：
+
+```powershell
+# 纯文本成功
+python runtime_cli.py --provider deepseek --model deepseek-flash --prompt "不要调用工具，只回复：Runtime 正常。"
+
+# 模型与文件工具往返
+python runtime_cli.py --provider deepseek --model deepseek-flash --workspace . --prompt "先列出当前目录，再读取 README.md，简要总结项目用途。"
+
+# 步数上限：模型返回工具调用时应停止，工具不执行
+python runtime_cli.py --provider deepseek --model deepseek-flash --max-steps 1 --prompt "请先调用 list_files 列出当前目录，不要直接回答。"
+
+# 定时请求取消，也可在运行中按 Ctrl+C
+python runtime_cli.py --provider deepseek --model deepseek-flash --cancel-after 2 --prompt "详细解释 Agent Runtime 的生命周期和资源清理。"
+```
+
+成功时应看到 `[Run结果] succeeded · stop` 和 `[模型资源] 已关闭`；
+达到轮数上限时为 `failed · step_limit`；取消时为 `cancelled · cancelled`。
+模型若在定时取消前完成，仍保留成功结果；若直接回答而未请求工具，`--max-steps 1` 也可成功。
+
+- SDK 重试默认 0，便于观察原始失败；可用 `--max-retries` 调整。
+- `--timeout` 是模型请求超时；`--cancel-after` 是取消请求时刻，不是强制终止期限。
+- 支持原有生成选项 `--max-output-tokens`、`--reasoning`、`--temperature`，以及 `--system`。
+- 命令工具默认禁止；`--allow-commands` 启用。文件工具沿用工作目录内的读写能力。
+- 退出码：成功 0，运行失败或模型关闭失败 1，配置错误 2，取消 130。PowerShell 用 `$LASTEXITCODE` 查看。
+- 文本输出到 stdout，事件与结果摘要输出到 stderr；不打印完整历史、原始错误响应或密钥。
+- CLI 为单任务入口，不复用会话。原 `agent_cli.py` 继续用于多轮 Loop 对话。
+
+本次仅通过离线假模型验证入口，未调用真实 API。真实运行会使用对应账号的服务额度。
+设计与测试见 [Runtime CLI](docs/runtime-cli-api-validation.md)。
