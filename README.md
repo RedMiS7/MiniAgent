@@ -523,9 +523,9 @@ async with create_harness(config, ToolContext(".")) as harness:
 关闭操作幂等；若模型关闭报错，异常向调用方传递，Harness 仍不可再次运行。
 工具执行器和注册工具仍为借用依赖，本入口不自动关闭它们。
 
-当前仅包含 P6 的组合与生命周期入口：沿用既有工具访问限制，尚未增加
-`allow / deny / ask`、人工审批、事件回调汇集、自动恢复或 Session。
-CLI 尚未迁移到此入口。设计说明见 [Harness 入口](docs/p6-harness-entry.md)。
+当前提供 P6 的组合入口和指定工具逐次审批：通过 `approval_required` 指定工具名，
+通过异步 `approve(call, arguments)` 返回严格的布尔决定。未指定的工具保持原行为。
+事件回调汇集、自动恢复和 Session 尚未实现；`harness_cli.py` 提供 Brave 搜索审批入口。设计说明见 [Harness 入口](docs/p6-harness-entry.md)。
 
 
 ## Brave Search MCP 接入
@@ -546,8 +546,8 @@ Python 依赖新增 `mcp==1.26.0`。先在虚拟环境安装 requirements.txt。
 
 CLI 不需要模型 API；默认发现工具，`--query` 才执行搜索。退出码：0 成功、1 连接或
 工具调用失败、2 参数错误、130 用户中断。真实搜索需要有效的 Brave Search API 凭证。
-本次尚未实现 Harness 审批，因此不会自动给现有 Agent CLI 注册此工具。
-独立 CLI 的 `--query` 是用户显式发起的调用，不代表自动工具调用已有审批保护。
+独立 MCP CLI 的 `--query` 是用户显式发起的诊断调用，不经过 Harness 审批。
+模型自动调用搜索时，请使用下文 `harness_cli.py`，它强制对每次搜索进行人工审批。
 
 程序中可显式连接后使用现有执行器：
 
@@ -573,3 +573,44 @@ extension 的 `await brave_search.register(registry, session)` 也可将搜索�
 当前转换支持文本与结构化 JSON 结果；MCP `isError` 映射为工具失败，其他内容类型
 明确报错。参数 schema 来自服务发现并交由原执行器校验，不手写另一套搜索参数。
 更多设计及验证见 [Brave MCP 接入](docs/brave-search-mcp-extension.md)。
+
+
+## Harness 搜索人工审批
+
+配置模型所需的环境变量（例如 DEEPSEEK_API_KEY）与 BRAVE_API_KEY 后：
+
+```powershell
+.\.venv\Scripts\python.exe harness_cli.py --provider deepseek --model deepseek-flash --prompt "请搜索 MCP 协议并总结搜索结果。"
+```
+
+模型名替换为账户支持的型号。此入口只注册 Brave 搜索，默认模型 SDK 重试为 0；
+支持 `--max-steps`（默认 12）和 `--timeout`（默认 60 秒模型请求超时）。
+
+每次搜索前显示工具名、调用 ID 和实际搜索参数。Windows 输入 y 批准本次，n、回车或
+Esc 拒绝；其他平台输入 y 后回车批准。非交互终端默认拒绝，不能用管道自动批准。
+Ctrl+C 取消整个任务并等待清理，包括正在等待的审批；拒绝本次搜索不会直接取消 Run，
+模型可以说明情况或提出新调用，新调用仍需再次审核。退出码 0 表示 Run 成功、1 表示
+执行/配置/资源关闭失败、2 表示命令行参数错误、130 表示取消或中断。
+
+程序调用方式（model、executor 由调用方准备）：
+
+```python
+async def approve(call, arguments):
+    # 接入自己的交互界面；只返回 bool，拒绝返回 False。
+    return False
+
+async with AgentHarness(model, executor,
+                        approval_required=("brave_web_search",), approve=approve) as harness:
+    async with harness.run(messages) as run:
+        async for event in run.events():
+            pass
+```
+
+工具参数先通过原 schema 校验，再审批，再执行。回调拿到的是副本，不能修改实际执行参数。
+审批异常或非 bool 返回值会阻止执行并使 Run 失败；普通拒绝以 `approval_denied` 工具结果
+回传模型。人工批准不会绕过原有文件和命令访问限制。策略仅作用于该 Harness，直接使用
+原执行器或 MCP 诊断 CLI 不受此策略约束。
+
+ToolStarted 表示开始处理调用（可能还在等待审批），不能用它证明工具已执行。
+审批回调必须配合取消并完成收尾；不会强制杀死不合作的回调或回滚已发生的副作用。
+设计及测试见 [Harness 工具审批](docs/p6-harness-tool-approval.md)。

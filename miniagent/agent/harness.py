@@ -4,6 +4,7 @@ from typing import AsyncIterator, Sequence
 
 from miniagent.models import GenerationOptions, LLM, Message
 from miniagent.tools import ToolExecutor
+from .approval import ApprovalCallback, ApprovalExecutor
 from .loop import AgentLoop
 from .runtime import AgentRuntime
 
@@ -11,9 +12,18 @@ from .runtime import AgentRuntime
 class AgentHarness:
     """Borrow dependencies unless model ownership is explicitly transferred."""
 
-    def __init__(self, model: LLM, executor: ToolExecutor, *, owns_model: bool = False):
+    def __init__(
+        self, model: LLM, executor: ToolExecutor, *, owns_model: bool = False,
+        approval_required: Sequence[str] = (), approve: ApprovalCallback | None = None,
+    ):
         self._model = model
-        self._executor = executor
+        required = frozenset(approval_required)
+        if required and approve is None:
+            raise ValueError("An approval callback is required for protected tools.")
+        unknown = required - {tool.name for tool in executor.registry.definitions()}
+        if unknown:
+            raise ValueError("Approval policy references unregistered tools.")
+        self._executor = ApprovalExecutor(executor, required, approve) if required else executor
         self._owns_model = owns_model
         self._active = False
         self._closed = False

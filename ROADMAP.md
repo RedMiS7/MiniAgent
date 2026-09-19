@@ -114,7 +114,7 @@ P5 已通过离线验收：实现单次执行、流式作用域、取消、结�
 - 模拟测试覆盖审批批准与拒绝、中断后的取消或恢复，以及可重试与不可重试失败；未批准的调用不可执行，重试与恢复不会自动重放已完成的副作用。
 - 至少两种现有 Model Adapters 通过模拟工具往返测试；替换 Model 或注册新 Tool 无需修改 Agent Loop 和 Runtime。
 
-P6 首个子任务已完成：提供顺序复用的 AgentHarness 和集中初始化入口，每次运行使用独立 Runtime，明确模型所有权。完整事件流和结果直接复用 Runtime，不新增 RunState。工具审批、事件回调汇集与后续恢复策略仍待完成；见 docs/p6-harness-entry.md。
+P6 首个子任务已完成：提供顺序复用的 AgentHarness 和集中初始化入口，每次运行使用独立 Runtime，明确模型所有权。完整事件流和结果直接复用 Runtime，不新增 RunState。指定工具逐次审批已实现（见 docs/p6-harness-tool-approval.md）；事件回调汇集与后续恢复策略仍待完成。入口设计见 docs/p6-harness-entry.md。
 
 ## P7：Session 与 Streaming
 
@@ -135,7 +135,7 @@ CLI 多轮子任务已完成：agent_cli.py 在单进程内保留成功历史及
 - [ ] Session Persistence：会话保存与恢复。
 - [ ] Context Compaction 与 Memory：上下文压缩与长期记忆。
 - [ ] Retrieval 与 MCP Tools：检索和外部服务接入。
-  - 已按实际需求提前接入 Brave Search MCP 的单个搜索工具，支持 extension 注册及独立 CLI 验证；Harness 人工审批尚未接入，见 docs/brave-search-mcp-extension.md。
+  - 已按实际需求提前接入 Brave Search MCP 的单个搜索工具，支持 extension 注册及独立 CLI 验证；Harness 搜索人工审批已接入，见 docs/brave-search-mcp-extension.md 和 docs/p6-harness-tool-approval.md。
 - [ ] Planning 与 Evaluation：任务规划和结果检查。
 - [ ] Human-in-the-loop 扩展：在 P6 工具审批基础上，按需支持人工修改计划或执行结果。
 

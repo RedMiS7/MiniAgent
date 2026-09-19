@@ -1,12 +1,17 @@
 import asyncio
 import json
 import time
-from typing import Callable
+from copy import deepcopy
+from typing import Awaitable, Callable
 
 from miniagent.models import ToolCall
 from .base import ToolContext, ToolError, ToolResult
 from .events import ToolCancelled, ToolCompleted, ToolEvent, ToolFailed, ToolStarted
 from .registry import ToolRegistry
+
+
+class ToolApprovalError(RuntimeError):
+    """Approval infrastructure failed; the Run must stop without executing."""
 
 
 class ToolExecutor:
@@ -30,6 +35,7 @@ class ToolExecutor:
 
     async def execute(
         self, call: ToolCall, *, on_event: Callable[[ToolEvent], None] | None = None,
+        approve: Callable[[ToolCall, dict], Awaitable[bool]] | None = None,
     ) -> ToolResult:
         start = time.monotonic()
         self._emit(ToolStarted(call_id=call.id, tool_name=call.name), on_event)
@@ -44,10 +50,25 @@ class ToolExecutor:
             if not isinstance(arguments, dict):
                 raise ToolError("invalid_arguments", "Arguments must be an object.")
             self.registry.validate(call.name, arguments)
+            if approve is not None:
+                try:
+                    approved = await approve(call.model_copy(deep=True), deepcopy(arguments))
+                    if type(approved) is not bool:
+                        raise TypeError("Approval must return a boolean.")
+                except Exception as exc:
+                    raise ToolApprovalError("Tool approval failed.") from exc
+                if not approved:
+                    raise ToolError("approval_denied", "The user denied this tool call.")
             result = await tool.execute(arguments, self.context)
         except asyncio.CancelledError:
             self._emit(ToolCancelled(
                 call_id=call.id, tool_name=call.name, elapsed_seconds=time.monotonic() - start,
+            ), on_event)
+            raise
+        except ToolApprovalError:
+            self._emit(ToolFailed(
+                call_id=call.id, tool_name=call.name, elapsed_seconds=time.monotonic() - start,
+                error_code="approval_error",
             ), on_event)
             raise
         except ToolError as exc:
