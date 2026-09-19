@@ -52,7 +52,8 @@ async def run(config, prompt, *, max_steps=12):
     async with connect_brave_search() as registry:
         executor = ToolExecutor(registry, ToolContext(Path.cwd()))
         async with AgentHarness(create_model(config), executor, owns_model=True,
-                                approval_required=("brave_web_search",), approve=approve_tool) as harness:
+                                approval_required=("brave_web_search",), approve=approve_tool,
+                                on_event=lambda run, event: console.show(event)) as harness:
             active = None
             previous = signal.getsignal(signal.SIGINT)
             loop = asyncio.get_running_loop()
@@ -64,8 +65,8 @@ async def run(config, prompt, *, max_steps=12):
             try:
                 signal.signal(signal.SIGINT, interrupt)
                 async with harness.run([Message(role="user", content=prompt)], max_steps=max_steps) as active:
-                    async for event in active.events():
-                        console.show(event)
+                    async for _ in active.events():
+                        pass
                 return 0 if active.result.status == "succeeded" else 1
             except asyncio.CancelledError:
                 return 130

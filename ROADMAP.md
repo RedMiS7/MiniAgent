@@ -102,7 +102,7 @@ P5 已通过离线验收：实现单次执行、流式作用域、取消、结�
 ## P6：Agent Harness
 
 - [x] 组装 Harness，注入 Model、Tools、Agent Loop 和 Runtime，提供统一运行入口。
-- [ ] 在 Harness 中配置工具授权并汇集 Events。
+- [x] 在 Harness 中配置工具授权并汇集 Events。
 - [ ] 实现审批、中断处理、重试和错误恢复策略，依据 Runtime 的运行事实作出决策，并通过运行控制接口落实。
 - [ ] 用不同任务验证 Harness 复用，编写使用示例。
 
@@ -114,7 +114,7 @@ P5 已通过离线验收：实现单次执行、流式作用域、取消、结�
 - 模拟测试覆盖审批批准与拒绝、中断后的取消或恢复，以及可重试与不可重试失败；未批准的调用不可执行，重试与恢复不会自动重放已完成的副作用。
 - 至少两种现有 Model Adapters 通过模拟工具往返测试；替换 Model 或注册新 Tool 无需修改 Agent Loop 和 Runtime。
 
-P6 首个子任务已完成：提供顺序复用的 AgentHarness 和集中初始化入口，每次运行使用独立 Runtime，明确模型所有权。完整事件流和结果直接复用 Runtime，不新增 RunState。指定工具逐次审批已实现（见 docs/p6-harness-tool-approval.md）；事件回调汇集与后续恢复策略仍待完成。入口设计见 docs/p6-harness-entry.md。
+P6 首个子任务已完成：提供顺序复用的 AgentHarness 和集中初始化入口，每次运行使用独立 Runtime，明确模型所有权。完整事件流和结果直接复用 Runtime，不新增 RunState。指定工具逐次审批已实现（见 docs/p6-harness-tool-approval.md）；事件回调汇集已完成，通过所属 Runtime 关联事件并隔离展示故障（见 docs/p6-harness-event-callback.md）；后续恢复策略仍待完成。入口设计见 docs/p6-harness-entry.md。
 
 ## P7：Session 与 Streaming
 

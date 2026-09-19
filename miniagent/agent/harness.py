@@ -1,11 +1,11 @@
 """Reusable, sequential entry point for independent Agent runs."""
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Sequence
+from typing import AsyncIterator, Callable, Sequence
 
 from miniagent.models import GenerationOptions, LLM, Message
 from miniagent.tools import ToolExecutor
 from .approval import ApprovalCallback, ApprovalExecutor
-from .loop import AgentLoop
+from .loop import AgentLoop, LoopEvent
 from .runtime import AgentRuntime
 
 
@@ -15,7 +15,14 @@ class AgentHarness:
     def __init__(
         self, model: LLM, executor: ToolExecutor, *, owns_model: bool = False,
         approval_required: Sequence[str] = (), approve: ApprovalCallback | None = None,
+        on_event: Callable[[AgentRuntime, LoopEvent], None] | None = None,
     ):
+        if on_event is not None:
+            import inspect
+            if (not callable(on_event) or inspect.iscoroutinefunction(on_event)
+                    or inspect.iscoroutinefunction(getattr(on_event, "__call__", None))):
+                raise TypeError("on_event must be a synchronous callback.")
+        self._on_event = on_event
         self._model = model
         required = frozenset(approval_required)
         if required and approve is None:
@@ -40,7 +47,11 @@ class AgentHarness:
             raise RuntimeError("The Harness already has an active Run.")
         self._active = True
         try:
-            runtime = AgentRuntime(AgentLoop(self._model, self._executor))
+            def notify(event):
+                self._on_event(runtime, event)
+
+            runtime = AgentRuntime(AgentLoop(self._model, self._executor),
+                                   on_event=notify if self._on_event is not None else None)
             async with runtime.stream(messages, options, max_steps=max_steps) as run:
                 yield run
         finally:

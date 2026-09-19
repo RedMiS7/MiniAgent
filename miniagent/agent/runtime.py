@@ -1,7 +1,7 @@
 """Scoped, single-run execution and terminal result ownership around AgentLoop."""
 import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Sequence
+from typing import AsyncIterator, Callable, Sequence
 
 from miniagent.models import GenerationOptions, LLMError, Message
 from .events import AgentCancelled, AgentCompleted, AgentFailed
@@ -12,8 +12,9 @@ from .run_types import RunResult
 class AgentRuntime:
     """Own one Run; the injected Loop and its dependencies are borrowed."""
 
-    def __init__(self, loop: AgentLoop):
+    def __init__(self, loop: AgentLoop, *, on_event: Callable[[LoopEvent], None] | None = None):
         self._loop = loop
+        self._on_event = on_event
         self._started = False
         self._result: RunResult | None = None
         self._task: asyncio.Task | None = None
@@ -147,8 +148,7 @@ class AgentRuntime:
                     elif isinstance(event, AgentCancelled):
                         terminal = RunResult(status="cancelled", reason=event.reason)
                     else:
-                        self._event = event
-                        self._ready.set()
+                        self._publish(event)
                 self._closing = True
                 # Finish cleanup and collect any exception before exposing a terminal event.
                 try:
@@ -189,9 +189,19 @@ class AgentRuntime:
             if self._error is None:
                 self._error = self._cleanup_error
         if self._result.status == "succeeded":
-            self._event = AgentCompleted(messages=self._result.messages)
+            event = AgentCompleted(messages=self._result.messages)
         elif self._result.status == "cancelled":
-            self._event = AgentCancelled()
+            event = AgentCancelled()
         else:
-            self._event = AgentFailed(reason=self._result.reason)
+            event = AgentFailed(reason=self._result.reason)
+        self._publish(event)
+
+    def _publish(self, event: LoopEvent) -> None:
+        self._event = event
+        if self._on_event is not None:
+            try:
+                self._on_event(event.model_copy(deep=True))
+            except (Exception, asyncio.CancelledError):
+                # Observation cannot change execution facts or trigger a retry.
+                pass
         self._ready.set()

@@ -525,7 +525,8 @@ async with create_harness(config, ToolContext(".")) as harness:
 
 当前提供 P6 的组合入口和指定工具逐次审批：通过 `approval_required` 指定工具名，
 通过异步 `approve(call, arguments)` 返回严格的布尔决定。未指定的工具保持原行为。
-事件回调汇集、自动恢复和 Session 尚未实现；`harness_cli.py` 提供 Brave 搜索审批入口。设计说明见 [Harness 入口](docs/p6-harness-entry.md)。
+支持通过同步 `on_event(run, event)` 汇集事件；自动恢复和 Session 尚未实现。
+`harness_cli.py` 提供 Brave 搜索审批入口，并使用统一事件回调展示过程。设计说明见 [Harness 入口](docs/p6-harness-entry.md)。
 
 
 ## Brave Search MCP 接入
@@ -614,3 +615,31 @@ async with AgentHarness(model, executor,
 ToolStarted 表示开始处理调用（可能还在等待审批），不能用它证明工具已执行。
 审批回调必须配合取消并完成收尾；不会强制杀死不合作的回调或回滚已发生的副作用。
 设计及测试见 [Harness 工具审批](docs/p6-harness-tool-approval.md)。
+
+
+## Harness 事件回调
+
+`AgentHarness(..., on_event=callback)` 为每个已发布的 Agent、模型、工具事件调用一次
+同步 `callback(run, event)`。run 是本次 Runtime 对象，同一次任务保持同一对象，不同任务
+使用不同对象；调用方可据此关联事件，不需要给底层事件增加运行 ID 或再定义 RunEvent。
+
+```python
+def on_event(run, event):
+    # 例如交给 UI；默认不要记录完整消息及敏感工具参数。
+    print(event.type)
+
+async with AgentHarness(model, executor, on_event=on_event) as harness:
+    async with harness.run(messages) as run:
+        async for _ in run.events():
+            pass  # 仍须消费事件以推进运行；展示统一由回调处理。
+    print(run.result.status)
+```
+
+回调不代替事件消费，不启动后台自动执行。它接收事件的深拷贝，修改其嵌套载荷不会
+改变执行历史。回调中的普通异常（包括显式抛出的 CancelledError）被隔离，不重试回调
+或重放工具；要取消任务请显式调用 `run.cancel()`。回调是展示通知，不是人工审批通道。
+
+正常消费时回调与流中事件顺序一致。提前退出运行作用域后，Runtime 取消并清理，
+回调仍会收到最终事件；此时流消费者可能已经离开。终态回调执行时 `run.result` 已确定。
+回调仅支持快速同步操作，不接受 async 函数；慢回调会拖慢运行，不提供独立队列、
+持久化或可靠投递。Harness 不默认保存事件历史。
