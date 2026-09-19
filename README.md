@@ -643,3 +643,33 @@ async with AgentHarness(model, executor, on_event=on_event) as harness:
 回调仍会收到最终事件；此时流消费者可能已经离开。终态回调执行时 `run.result` 已确定。
 回调仅支持快速同步操作，不接受 async 函数；慢回调会拖慢运行，不提供独立队列、
 持久化或可靠投递。Harness 不默认保存事件历史。
+
+
+## Harness 复用离线示例
+
+在项目根目录运行，不需要模型或 Brave API 密钥，也不访问网络：
+
+```powershell
+.\.venv\Scripts\python.exe -m examples.harness_reuse
+```
+
+示例创建临时文档，在同一 Harness 实例上顺序执行两个独立任务：
+1. list_files → read_file → 返回文件摘要。
+2. echo → 返回 Hello Harness。
+
+文件操作使用现有工具；echo 通过 examples/echo_extension.py 的 register 接入，
+直接返回文本，不调用 shell。注册表只提供列目录、读文件与 echo，不开放写入或命令工具。
+示例结束后清理临时目录，不读取或修改项目文件。
+
+示例模型使用预设响应，摘要文字也是预设的，只用于展示组件配合和任务隔离，不证明真实
+模型的摘要质量。examples.harness_reuse.run_tasks(model, workspace) 接受统一模型接口，
+借用模型并复用同一 Harness；模型由调用方关闭。测试另外使用真实 OpenAI/DeepSeek
+适配器和 SDK，HTTP 层由 MockTransport 提供流式响应，验收协议转换和工具往返。
+
+定向运行适配器复用测试：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_harness_reuse.py -v
+```
+
+验收范围与剩余工作见 [Harness 复用验收](docs/p6-harness-reuse-acceptance.md)。
