@@ -37,3 +37,12 @@ def create_tools(model_config: ModelConfig | None = None, image_models: dict[str
         backends["current"] = ImageAdapter(model_config)
     image.register(registry, backends)
     return registry
+
+
+def create_harness(config: ModelConfig, context):
+    """Create a Harness that owns its model, using the built-in extensions."""
+    from .agent import AgentHarness
+    from .tools import ToolExecutor
+
+    executor = ToolExecutor(create_tools(config), context)
+    return AgentHarness(create_model(config), executor, owns_model=True)

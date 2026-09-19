@@ -7,10 +7,11 @@ from .events import (
 from .loop import AgentLoop, LoopEvent
 from .run_types import RunResult
 from .runtime import AgentRuntime
+from .harness import AgentHarness
 
 __all__ = [
     "AgentLoop", "LoopEvent",
-    "AgentRuntime", "RunResult",
+    "AgentRuntime", "RunResult", "AgentHarness",
     "AgentEvent", "AgentStarted", "AgentProgress", "AgentCompleted",
     "AgentFailed", "AgentCancelled",
 ]

@@ -492,3 +492,37 @@ python runtime_cli.py --provider deepseek --model deepseek-flash --cancel-after 
 
 本次仅通过离线假模型验证入口，未调用真实 API。真实运行会使用对应账号的服务额度。
 设计与测试见 [Runtime CLI](docs/runtime-cli-api-validation.md)。
+
+
+## Harness 最小运行入口
+
+`AgentHarness` 顺序复用 Model 和 ToolExecutor，每次 `run` 创建独立 Runtime。
+完整消费 `run.events()`，退出运行作用域后通过 `run.result` 读取最终结果。
+提前退出作用域会取消任务并等待清理；有活动作用域时不能启动第二个任务或关闭 Harness。
+失败和取消沿用 Runtime 的异常语义，首版不自动重试。
+
+```python
+from miniagent.bootstrap import create_harness
+from miniagent.config import ModelConfig
+from miniagent.models import Message
+from miniagent.tools import ToolContext
+
+# 放在异步函数中；模型名使用账户支持的型号。
+config = ModelConfig.from_env("deepseek", "deepseek-flash")
+async with create_harness(config, ToolContext(".")) as harness:
+    for prompt in ("只回复你好", "只回复再见"):
+        async with harness.run([Message(role="user", content=prompt)]) as run:
+            async for event in run.events():
+                # 此处接入调用方的事件展示；不要默认记录敏感输入输出。
+                pass
+        print(run.result.status, run.result.reason)
+```
+
+工厂创建的模型由 Harness 在关闭时释放；直接使用 `AgentHarness(model, executor)`
+时默认借用模型，由调用方关闭。只有明确移交模型所有权时才传 `owns_model=True`。
+关闭操作幂等；若模型关闭报错，异常向调用方传递，Harness 仍不可再次运行。
+工具执行器和注册工具仍为借用依赖，本入口不自动关闭它们。
+
+当前仅包含 P6 的组合与生命周期入口：沿用既有工具访问限制，尚未增加
+`allow / deny / ask`、人工审批、事件回调汇集、自动恢复或 Session。
+CLI 尚未迁移到此入口。设计说明见 [Harness 入口](docs/p6-harness-entry.md)。
