@@ -526,3 +526,50 @@ async with create_harness(config, ToolContext(".")) as harness:
 当前仅包含 P6 的组合与生命周期入口：沿用既有工具访问限制，尚未增加
 `allow / deny / ask`、人工审批、事件回调汇集、自动恢复或 Session。
 CLI 尚未迁移到此入口。设计说明见 [Harness 入口](docs/p6-harness-entry.md)。
+
+
+## Brave Search MCP 接入
+
+此入口使用官方 `@brave/brave-search-mcp-server@2.1.4`，通过 STDIO 连接，
+只将 `brave_web_search` 注册到现有 ToolRegistry。需要 Node.js 22+、npx 和
+`BRAVE_API_KEY` 环境变量；首次启动时 npx 下载固定版本服务，不进行全局安装。
+Python 依赖新增 `mcp==1.26.0`。先在虚拟环境安装 requirements.txt。
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+# 先在本机安全配置 BRAVE_API_KEY；入口不自动加载 .env。
+# 只握手并展示搜索工具及参数定义，不发送搜索请求：
+.\.venv\Scripts\python.exe brave_mcp_cli.py
+# 显式执行一次真实搜索（使用 Brave API 配额）：
+.\.venv\Scripts\python.exe brave_mcp_cli.py --query "Model Context Protocol"
+```
+
+CLI 不需要模型 API；默认发现工具，`--query` 才执行搜索。退出码：0 成功、1 连接或
+工具调用失败、2 参数错误、130 用户中断。真实搜索需要有效的 Brave Search API 凭证。
+本次尚未实现 Harness 审批，因此不会自动给现有 Agent CLI 注册此工具。
+独立 CLI 的 `--query` 是用户显式发起的调用，不代表自动工具调用已有审批保护。
+
+程序中可显式连接后使用现有执行器：
+
+```python
+from miniagent.bootstrap import connect_brave_search
+from miniagent.models import ToolCall
+from miniagent.tools import ToolContext, ToolExecutor
+
+# 放在异步函数中，连接作用域应覆盖工具使用的整个过程。
+async with connect_brave_search() as registry:
+    executor = ToolExecutor(registry, ToolContext("."))
+    result = await executor.execute(ToolCall(
+        id="search-1", name="brave_web_search",
+        arguments='{"query": "Model Context Protocol", "count": 3}',
+    ))
+```
+
+extension 的 `await brave_search.register(registry, session)` 也可将搜索工具注册进
+已有 Registry；session 由调用方初始化并持有，必须在连接关闭前结束所有工具调用。
+连接作用域负责释放 MCP session 和本地服务进程。启动使用独立临时目录，避免服务
+的 dotenv 自动加载项目中的其他凭证。MCP 搜索并不受工作目录文件权限控制。
+
+当前转换支持文本与结构化 JSON 结果；MCP `isError` 映射为工具失败，其他内容类型
+明确报错。参数 schema 来自服务发现并交由原执行器校验，不手写另一套搜索参数。
+更多设计及验证见 [Brave MCP 接入](docs/brave-search-mcp-extension.md)。

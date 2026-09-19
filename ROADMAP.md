@@ -135,6 +135,7 @@ CLI 多轮子任务已完成：agent_cli.py 在单进程内保留成功历史及
 - [ ] Session Persistence：会话保存与恢复。
 - [ ] Context Compaction 与 Memory：上下文压缩与长期记忆。
 - [ ] Retrieval 与 MCP Tools：检索和外部服务接入。
+  - 已按实际需求提前接入 Brave Search MCP 的单个搜索工具，支持 extension 注册及独立 CLI 验证；Harness 人工审批尚未接入，见 docs/brave-search-mcp-extension.md。
 - [ ] Planning 与 Evaluation：任务规划和结果检查。
 - [ ] Human-in-the-loop 扩展：在 P6 工具审批基础上，按需支持人工修改计划或执行结果。
 

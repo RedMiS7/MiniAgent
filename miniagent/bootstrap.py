@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from openai import AsyncOpenAI
 
 from .config import ModelConfig
@@ -46,3 +48,37 @@ def create_harness(config: ModelConfig, context):
 
     executor = ToolExecutor(create_tools(config), context)
     return AgentHarness(create_model(config), executor, owns_model=True)
+
+
+@asynccontextmanager
+async def connect_brave_search():
+    """Own a Brave STDIO server and session; consume tools inside this scope."""
+    import os
+    import shutil
+    from datetime import timedelta
+    from tempfile import TemporaryDirectory
+
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    from .extensions import brave_search
+    from .tools import ToolRegistry
+
+    key = os.environ.get("BRAVE_API_KEY", "").strip()
+    if not key:
+        raise ValueError("Set BRAVE_API_KEY before connecting to Brave Search.")
+    command = shutil.which("npx")
+    if command is None:
+        raise ValueError("Brave MCP requires Node.js and npx on PATH.")
+    # Keep the server's dotenv loader away from the project's .env files.
+    with TemporaryDirectory(prefix="miniagent-brave-") as cwd:
+        parameters = StdioServerParameters(
+            command=command,
+            args=["-y", "@brave/brave-search-mcp-server@2.1.4", "--transport", "stdio"],
+            env={"BRAVE_API_KEY": key}, cwd=cwd,
+        )
+        async with stdio_client(parameters) as (read, write):
+            async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=60)) as session:
+                await session.initialize()
+                registry = ToolRegistry()
+                await brave_search.register(registry, session)
+                yield registry
