@@ -499,7 +499,7 @@ python runtime_cli.py --provider deepseek --model deepseek-flash --cancel-after 
 `AgentHarness` 顺序复用 Model 和 ToolExecutor，每次 `run` 创建独立 Runtime。
 完整消费 `run.events()`，退出运行作用域后通过 `run.result` 读取最终结果。
 提前退出作用域会取消任务并等待清理；有活动作用域时不能启动第二个任务或关闭 Harness。
-失败和取消沿用 Runtime 的异常语义，首版不自动重试。
+失败和取消沿用 Runtime 的异常语义。默认不重试；显式传入 RetryPolicy 可启用模型请求重试。
 
 ```python
 from miniagent.bootstrap import create_harness
@@ -525,7 +525,7 @@ async with create_harness(config, ToolContext(".")) as harness:
 
 当前提供 P6 的组合入口和指定工具逐次审批：通过 `approval_required` 指定工具名，
 通过异步 `approve(call, arguments)` 返回严格的布尔决定。未指定的工具保持原行为。
-支持通过同步 `on_event(run, event)` 汇集事件；自动恢复和 Session 尚未实现。
+支持通过同步 `on_event(run, event)` 汇集事件；支持本 Run 内模型有限重试，持久化恢复和 Session 尚未实现。
 `harness_cli.py` 提供 Brave 搜索审批入口，并使用统一事件回调展示过程。设计说明见 [Harness 入口](docs/p6-harness-entry.md)。
 
 
@@ -673,3 +673,62 @@ async with AgentHarness(model, executor, on_event=on_event) as harness:
 ```
 
 验收范围与剩余工作见 [Harness 复用验收](docs/p6-harness-reuse-acceptance.md)。
+
+
+## 模型重试与 CLI 故障演练
+
+Harness 可显式配置 `RetryPolicy(max_retries=2, base_delay=1, max_delay=30)`。
+每个模型步骤最多额外重试 2 次（共 3 次请求）。第 n 次重试采用全抖动：
+`uniform(0, min(max_delay, base_delay * 2**(n-1)))`，因此实际等待时间不一定逐次增长。
+延迟参数必须为正有限数，max_delay 不小于 base_delay。
+
+仅当适配层标记 `LLMError.retryable=True` 且尚未交付任何模型事件时重试。
+已经交付文本、工具调用增量或完成响应后均不重试。每次重试先关闭失败的流，
+关闭失败不重试；携带显式异常原因的错误也保守地不重试，避免吞掉收尾故障。等待期间 Ctrl+C 可以取消。继续使用当前模型请求中的消息和工具结果，
+不重放已完成工具。重试不占用新的逻辑模型轮次，仍受每步独立重试上限约束。
+`on_retry(number, delay, error_code)` 是可选同步诊断回调，不含原始响应或敏感参数，
+与 AgentEvent 的逻辑步骤/终态分开；它的异常不会触发重试或中断任务。
+
+`create_harness(..., retry_policy=policy)` 为其创建的模型关闭 SDK 重试，原 ModelConfig
+不变。直接注入模型时，调用方负责关闭其内部重试，Harness 不读取厂商 SDK 私有属性。
+默认 AgentHarness 不启用重试；harness_cli 默认启用额外 2 次重试，`--retries 0` 可关闭。
+
+### 不需要任何密钥的测试
+
+所有以下命令使用离线模型和本地 echo，不连接模型 API 或 MCP。prompt 用于占位，
+离线模型的行为是固定演练脚本，不代表真实模型能力。
+
+```powershell
+# echo 完成后，第 2 个模型步骤连续超时两次，然后恢复；echo 应只成功一次。
+.\.venv\Scripts\python.exe harness_cli.py --offline --prompt test --fault-error timeout --fault-count 2 --fault-step 2
+
+# 超过默认两次重试，最终失败并显示 rate_limit。
+.\.venv\Scripts\python.exe harness_cli.py --offline --prompt test --fault-error rate_limit --fault-count 3
+
+# 不可重试错误：直接失败，不显示“模型重试”。
+.\.venv\Scripts\python.exe harness_cli.py --offline --prompt test --fault-error authentication
+
+# 已经输出部分模拟文字：直接失败，不能拼接重试后的输出。
+.\.venv\Scripts\python.exe harness_cli.py --offline --prompt test --fault-error timeout --fault-after-partial
+
+# 工具失败回传模型，模型重新提出调用；不出现“模型重试”。
+.\.venv\Scripts\python.exe harness_cli.py --offline --prompt test --fault-tool-count 1
+
+# 较长退避窗口便于按 Ctrl+C 测试取消；随机等待可能短于上限。
+.\.venv\Scripts\python.exe harness_cli.py --offline --prompt test --fault-error server --fault-count 10 --retries 10 --retry-base 10 --retry-cap 30
+```
+
+使用 `$LASTEXITCODE` 检查：成功为 0，失败为 1，参数错误为 2，取消为 130。
+
+### 真实 API 前注入故障
+
+原真实调用命令可以添加相同的 `--fault-error`、`--fault-count`、`--fault-step`、
+`--fault-after-partial`。需要模型密钥及 BRAVE_API_KEY，搜索仍逐次人工审批。
+注入故障的尝试不调用模型 API；故障次数消耗完后才转到真实模型，可能消耗配额。
+`--fault-step` 从 1 开始按成功完成的模型响应计数；任务未到该步骤就不会触发。
+`--fault-tool-count` 仅供离线 echo 演练，不模拟远端搜索实际执行情况。
+故障注入默认关闭，代码位于 examples/retry_faults.py，不自动进入正常模型或工具实现。
+
+工具错误继续由模型决定后续行动，每次新的受保护调用重新审批，并受 max_steps 限制。
+框架不自动重试工具，故障演练仅模拟“执行前失败”；执行结果不明时不能据此认定无副作用。
+程序崩溃后的恢复留给后续持久化 Session。本阶段不保存恢复点，不跨进程恢复。

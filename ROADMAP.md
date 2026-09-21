@@ -103,7 +103,7 @@ P5 已通过离线验收：实现单次执行、流式作用域、取消、结�
 
 - [x] 组装 Harness，注入 Model、Tools、Agent Loop 和 Runtime，提供统一运行入口。
 - [x] 在 Harness 中配置工具授权并汇集 Events。
-- [ ] 实现审批、中断处理、重试和错误恢复策略，依据 Runtime 的运行事实作出决策，并通过运行控制接口落实。
+- [x] 实现审批、中断取消和运行内错误处理：模型请求有限重试（指数退避与随机抖动），工具错误交回模型决定后续调用；不自动重放工具。
 - [x] 用不同任务验证 Harness 复用，编写使用示例。
 
 **验收标准**
@@ -111,12 +111,12 @@ P5 已通过离线验收：实现单次执行、流式作用域、取消、结�
 - 同一 Harness 可运行文件摘要和 echo 文本处理任务，仅调整指令和 Tools，独立 Run 不串用状态。
 - Harness 创建的共享资源按所有权关闭，外部注入资源不会被误关。
 - 未授权 Tools 不可执行，Events 能关联到对应 Run，事件回调失败不会导致重复执行。
-- 模拟测试覆盖审批批准与拒绝、中断后的取消或恢复，以及可重试与不可重试失败；未批准的调用不可执行，重试与恢复不会自动重放已完成的副作用。
+- 模拟测试覆盖审批批准与拒绝、中断取消、可重试与不可重试模型失败、退避抖动和工具错误后续处理；已输出模型事件后不重试，未批准的调用不可执行，已完成的工具不被自动重放。程序崩溃恢复归后续 Session Persistence。
 - 至少两种现有 Model Adapters 通过模拟工具往返测试；替换 Model 或注册新 Tool 无需修改 Agent Loop 和 Runtime。
 
-P6 首个子任务已完成：提供顺序复用的 AgentHarness 和集中初始化入口，每次运行使用独立 Runtime，明确模型所有权。完整事件流和结果直接复用 Runtime，不新增 RunState。指定工具逐次审批已实现（见 docs/p6-harness-tool-approval.md）；事件回调汇集已完成，通过所属 Runtime 关联事件并隔离展示故障（见 docs/p6-harness-event-callback.md）；后续恢复策略仍待完成。入口设计见 docs/p6-harness-entry.md。
+P6 首个子任务已完成：提供顺序复用的 AgentHarness 和集中初始化入口，每次运行使用独立 Runtime，明确模型所有权。完整事件流和结果直接复用 Runtime，不新增 RunState。指定工具逐次审批已实现（见 docs/p6-harness-tool-approval.md）；事件回调汇集已完成，通过所属 Runtime 关联事件并隔离展示故障（见 docs/p6-harness-event-callback.md）；运行内错误处理已完成，见 docs/p6-model-retry-fault-testing.md。入口设计见 docs/p6-harness-entry.md。
 
-P6 复用验收已完成：同实例顺序运行文件摘要与 echo，OpenAI/DeepSeek 真实适配器经模拟 HTTP 流完成工具往返，调用 ID、续接信息和资源所有权保持正确；示例与限制见 docs/p6-harness-reuse-acceptance.md。重试和恢复条目仍未完成，不将首版验收等同于整个 P6 完成。
+P6 复用验收已完成：同实例顺序运行文件摘要与 echo，OpenAI/DeepSeek 真实适配器经模拟 HTTP 流完成工具往返，调用 ID、续接信息和资源所有权保持正确；示例与限制见 docs/p6-harness-reuse-acceptance.md。本阶段错误处理范围已明确为模型有限重试与工具错误反馈；已补充离线与真实适配器模拟验收，见 docs/p6-model-retry-fault-testing.md。
 
 ## P7：Session 与 Streaming
 
@@ -134,7 +134,7 @@ CLI 多轮子任务已完成：agent_cli.py 在单进程内保留成功历史及
 
 ## P8：按需探索
 
-- [ ] Session Persistence：会话保存与恢复。
+- [ ] Session Persistence：会话保存与恢复，包含程序崩溃后通过持久化执行记录恢复会话。
 - [ ] Context Compaction 与 Memory：上下文压缩与长期记忆。
 - [ ] Retrieval 与 MCP Tools：检索和外部服务接入。
   - 已按实际需求提前接入 Brave Search MCP 的单个搜索工具，支持 extension 注册及独立 CLI 验证；Harness 搜索人工审批已接入，见 docs/brave-search-mcp-extension.md 和 docs/p6-harness-tool-approval.md。

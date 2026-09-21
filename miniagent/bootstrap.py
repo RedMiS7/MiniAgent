@@ -41,13 +41,17 @@ def create_tools(model_config: ModelConfig | None = None, image_models: dict[str
     return registry
 
 
-def create_harness(config: ModelConfig, context):
+def create_harness(config: ModelConfig, context, *, retry_policy=None, on_retry=None):
     """Create a Harness that owns its model, using the built-in extensions."""
     from .agent import AgentHarness
     from .tools import ToolExecutor
 
     executor = ToolExecutor(create_tools(config), context)
-    return AgentHarness(create_model(config), executor, owns_model=True)
+    if retry_policy is not None:
+        from dataclasses import replace
+        config = replace(config, max_retries=0)
+    return AgentHarness(create_model(config), executor, owns_model=True,
+                        retry_policy=retry_policy, on_retry=on_retry)
 
 
 @asynccontextmanager
